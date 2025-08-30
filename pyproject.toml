@@ -1,0 +1,56 @@
+[build-system]
+requires = ["setuptools>=45", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "comfyui-hunyuanvideo-foley"
+version = "1.0.0"
+description = "ComfyUI custom node for HunyuanVideo-Foley text-video-to-audio synthesis"
+readme = "README.md"
+requires-python = ">=3.8"
+authors = [
+    {name = "ComfyUI HunyuanVideo-Foley", email = ""},
+]
+keywords = ["comfyui", "audio", "video", "ai", "machine-learning"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Topic :: Multimedia :: Sound/Audio",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+dependencies = [
+    "torch>=2.0.0",
+    "torchvision>=0.15.0", 
+    "torchaudio>=2.0.0",
+    "numpy==1.26.4",
+    "scipy",
+    "diffusers",
+    "timm",
+    "accelerate",
+    "sentencepiece",
+    "huggingface_hub",
+    "pillow",
+    "av", 
+    "einops",
+    "pyyaml",
+    "omegaconf",
+    "easydict",
+    "loguru",
+    "tqdm",
+    "setuptools",
+    "pandas",
+    "pyarrow",
+    "urllib3==2.4.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/your-repo/ComfyUI_HunyuanVideoFoley"
+Repository = "https://github.com/your-repo/ComfyUI_HunyuanVideoFoley.git"
+Issues = "https://github.com/your-repo/ComfyUI_HunyuanVideoFoley/issues"
