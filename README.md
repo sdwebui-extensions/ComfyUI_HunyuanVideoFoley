@@ -28,12 +28,12 @@ This is a ComfyUI custom node wrapper for the HunyuanVideo-Foley model, which ge
 1. **Clone this repository** into your ComfyUI custom_nodes directory:
    ```bash
    cd ComfyUI/custom_nodes
-   git clone https://github.com/yichengup/ComfyUI_ycHunyuanVideoFoley.git
+   git clone https://github.com/if-ai/ComfyUI_HunyuanVideoFoley.git
    ```
 
 2. **Install dependencies**:
    ```bash
-   cd ComfyUI_ycHunyuanVideoFoley
+   cd ComfyUI_HunyuanVideoFoley
    pip install -r requirements.txt
    ```
 
@@ -151,3 +151,4 @@ Based on the HunyuanVideo-Foley project by Tencent. Original paper and code avai
 - Code: [https://github.com/tencent/HunyuanVideo-Foley]
 
 <img src="https://count.getloli.com/get/@IFAI_HyVideoFoley?theme=moebooru" alt=":IFAIloadImages_comfy" />
+
