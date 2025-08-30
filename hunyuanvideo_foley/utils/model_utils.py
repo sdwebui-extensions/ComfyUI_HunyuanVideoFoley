@@ -54,7 +54,29 @@ def load_model(model_path, config_path, device):
     # DAC-VAE
     dac_path = os.path.join(model_path, "vae_128d_48k.pth")
     logger.info(f"Loading DAC VAE model from: {dac_path}")
-    dac_model = DAC.load(dac_path)
+    try:
+        # Try loading with the standard DAC.load method
+        dac_model = DAC.load(dac_path)
+    except TypeError as e:
+        if "map_location" in str(e):
+            # Handle the map_location conflict by manually loading the state dict
+            logger.warning(f"DAC.load() failed with map_location conflict: {e}")
+            logger.info("Attempting manual DAC model loading...")
+            
+            # Create DAC model instance with appropriate parameters for vae_128d_48k
+            # Based on filename, this appears to be 128-dimensional latent space, 48kHz sample rate
+            dac_model = DAC(
+                encoder_dim=64,
+                latent_dim=128,  # 128d as indicated by filename
+                decoder_dim=1536,
+                sample_rate=48000,  # 48k as indicated by filename
+                continuous=False
+            )
+            state_dict = torch.load(dac_path, map_location="cpu", weights_only=False)
+            dac_model.load_state_dict(state_dict, strict=False)
+        else:
+            raise e
+    
     dac_model = dac_model.to(device)
     dac_model.requires_grad_(False)
     dac_model.eval()

@@ -348,6 +348,91 @@ class HunyuanVideoFoleyNode:
 
     
     @classmethod
+    def _process_frame_tensor_features(cls, frame_tensor, text_prompt, fps, model_dict, cfg):
+        """
+        Process frame tensor directly without creating temporary video files
+        This bypasses the file I/O overhead and works directly with VHS frame data
+        """
+        from hunyuanvideo_foley.utils.feature_utils import encode_text_feat, encode_video_with_siglip2, encode_video_with_sync
+        from hunyuanvideo_foley.utils.config_utils import AttributeDict
+        import torch
+        from einops import rearrange
+        
+        logger.info(f"Processing {frame_tensor.shape[0]} frames directly from tensor")
+        
+        # Convert ComfyUI frame format to the expected format
+        # ComfyUI frames: [batch, height, width, channels] in range [0,1]
+        # Expected: [1, time, channels, height, width] in range [0,1]
+        
+        frames = frame_tensor
+        if len(frames.shape) == 4:
+            # Rearrange from [T, H, W, C] to [1, T, C, H, W]
+            frames = rearrange(frames, 't h w c -> 1 t c h w')
+        
+        # Ensure frames are float and in [0,1] range
+        if frames.dtype != torch.float32:
+            frames = frames.float()
+        if frames.max() > 1.0:
+            frames = frames / 255.0
+        
+        b, t, c, h, w = frames.shape
+        logger.info(f"Frame tensor shape: {frames.shape}")
+        
+        # Calculate audio length based on frame count and FPS
+        audio_len_in_s = t / fps
+        logger.info(f"Calculated audio length: {audio_len_in_s:.2f}s for {t} frames at {fps} FPS")
+        
+        # Process visual features
+        logger.info("Extracting SigLIP2 visual features...")
+        
+        # Preprocess frames for SigLIP2 (resize to 512x512)
+        siglip2_frames = torch.nn.functional.interpolate(
+            rearrange(frames, 'b t c h w -> (b t) c h w'),
+            size=(512, 512), 
+            mode='bilinear', 
+            align_corners=False
+        )
+        siglip2_frames = rearrange(siglip2_frames, '(b t) c h w -> b t c h w', b=b)
+        siglip2_frames = model_dict.siglip2_preprocess(siglip2_frames)
+        siglip2_feat = encode_video_with_siglip2(siglip2_frames, model_dict)
+        
+        logger.info("Extracting Synchformer features...")
+        
+        # Preprocess frames for Synchformer (resize to 224x224)
+        sync_frames = torch.nn.functional.interpolate(
+            rearrange(frames, 'b t c h w -> (b t) c h w'),
+            size=(224, 224), 
+            mode='bilinear', 
+            align_corners=False
+        )
+        sync_frames = rearrange(sync_frames, '(b t) c h w -> b t c h w', b=b)
+        sync_frames = model_dict.syncformer_preprocess(sync_frames)
+        syncformer_feat = encode_video_with_sync(sync_frames, model_dict)
+        
+        # Create visual features object
+        visual_feats = AttributeDict({
+            'siglip2_feat': siglip2_feat,
+            'syncformer_feat': syncformer_feat,
+        })
+        
+        # Process text features
+        logger.info("Processing text features...")
+        neg_prompt = "noisy, harsh"
+        prompts = [neg_prompt, text_prompt]
+        text_feat_res, text_feat_mask = encode_text_feat(prompts, model_dict)
+        
+        text_feats = AttributeDict({
+            'text_feat': text_feat_res[1:2],  # Positive prompt
+            'uncond_text_feat': text_feat_res[0:1],  # Negative prompt
+            'text_mask': text_feat_mask[1:2],
+            'uncond_text_mask': text_feat_mask[0:1],
+        })
+        
+        logger.info(f"Feature extraction complete: visual={visual_feats.siglip2_feat.shape}, text={text_feats.text_feat.shape}")
+        
+        return visual_feats, text_feats, audio_len_in_s
+    
+    @classmethod
     def _process_negative_prompt(cls, user_negative_prompt=""):
         """
         Combine built-in negative prompt with user input
@@ -933,7 +1018,16 @@ class HunyuanVideoFoleyNode:
             
             # If CPU offload is enabled, move models to device for inference
             if cpu_offload and self._device is not None:
+                # Clear cache before moving models to prevent OOM
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
                 self.move_models_to_device()
+                
+                # Additional memory check after moving models
+                if torch.cuda.is_available():
+                    allocated = torch.cuda.memory_allocated() / 1024**3  # GB
+                    reserved = torch.cuda.memory_reserved() / 1024**3    # GB  
+                    logger.info(f"GPU memory after model loading: {allocated:.1f}GB allocated, {reserved:.1f}GB reserved")
             
             # Validate inputs - need either video or images
             if video is None and images is None:
@@ -977,7 +1071,7 @@ class HunyuanVideoFoleyNode:
                         logger.error(msg)
             
             elif images is not None:
-                # Handle IMAGE input (from PR #3)
+                # Handle IMAGE input (from PR #3) - revert to working approach
                 logger.info(f"Images input type: {type(images)}")
                 logger.info(f"Converting {images.shape[0] if hasattr(images, 'shape') else 'unknown'} images to video at {fps} FPS")
                 
@@ -1076,44 +1170,44 @@ class HunyuanVideoFoleyNode:
                 
                 # Merge audio and video
                 try:
-                    # Extra logging for debugging IMAGE input issues
-                    if temp_video_created:
-                        logger.info(f"Merging audio with temporary video created from images")
-                        # Check video properties
-                        import cv2
-                        cap = cv2.VideoCapture(video_file)
-                        if cap.isOpened():
-                            fps = cap.get(cv2.CAP_PROP_FPS)
-                            frame_count = cap.get(cv2.CAP_PROP_FRAME_COUNT)
-                            width = cap.get(cv2.CAP_PROP_FRAME_WIDTH)
-                            height = cap.get(cv2.CAP_PROP_FRAME_HEIGHT)
-                            logger.info(f"Temp video properties: {width}x{height}, {fps} FPS, {frame_count} frames")
-                            cap.release()
+                        # Extra logging for debugging IMAGE input issues
+                        if temp_video_created:
+                            logger.info(f"Merging audio with temporary video created from images")
+                            # Check video properties
+                            import cv2
+                            cap = cv2.VideoCapture(video_file)
+                            if cap.isOpened():
+                                fps_vid = cap.get(cv2.CAP_PROP_FPS)
+                                frame_count = cap.get(cv2.CAP_PROP_FRAME_COUNT)
+                                width = cap.get(cv2.CAP_PROP_FRAME_WIDTH)
+                                height = cap.get(cv2.CAP_PROP_FRAME_HEIGHT)
+                                logger.info(f"Temp video properties: {width}x{height}, {fps_vid} FPS, {frame_count} frames")
+                                cap.release()
+                            else:
+                                logger.error(f"Cannot open temporary video for inspection: {video_file}")
+                        
+                        # Check if both input files exist before merging
+                        if not os.path.exists(audio_output):
+                            raise Exception(f"Audio file does not exist: {audio_output}")
+                        if not os.path.exists(video_file):
+                            raise Exception(f"Video file does not exist: {video_file}")
+                            
+                        audio_size = os.path.getsize(audio_output)
+                        video_size = os.path.getsize(video_file)
+                        logger.info(f"Input files - Audio: {audio_size} bytes, Video: {video_size} bytes")
+                        
+                        merge_audio_video(audio_output, video_file, video_output_path)
+                        logger.info(f"Successfully created video with audio: {video_output_path}")
+                        
+                        # Verify the output file exists and has content
+                        if os.path.exists(video_output_path):
+                            file_size = os.path.getsize(video_output_path)
+                            logger.info(f"Output video file size: {file_size} bytes")
+                            if file_size == 0:
+                                raise Exception("Output video file is empty")
                         else:
-                            logger.error(f"Cannot open temporary video for inspection: {video_file}")
-                    
-                    # Check if both input files exist before merging
-                    if not os.path.exists(audio_output):
-                        raise Exception(f"Audio file does not exist: {audio_output}")
-                    if not os.path.exists(video_file):
-                        raise Exception(f"Video file does not exist: {video_file}")
-                        
-                    audio_size = os.path.getsize(audio_output)
-                    video_size = os.path.getsize(video_file)
-                    logger.info(f"Input files - Audio: {audio_size} bytes, Video: {video_size} bytes")
-                    
-                    merge_audio_video(audio_output, video_file, video_output_path)
-                    logger.info(f"Successfully created video with audio: {video_output_path}")
-                    
-                    # Verify the output file exists and has content
-                    if os.path.exists(video_output_path):
-                        file_size = os.path.getsize(video_output_path)
-                        logger.info(f"Output video file size: {file_size} bytes")
-                        if file_size == 0:
-                            raise Exception("Output video file is empty")
-                    else:
-                        raise Exception(f"Output video file was not created: {video_output_path}")
-                        
+                            raise Exception(f"Output video file was not created: {video_output_path}")
+                            
                 except Exception as e:
                     logger.error(f"Failed to merge audio and video: {e}")
                     logger.error(f"This is a critical issue when using IMAGE input - video path will show only the temporary video without audio")
