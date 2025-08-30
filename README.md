@@ -11,19 +11,29 @@ This is a ComfyUI custom node wrapper for the HunyuanVideo-Foley model, which ge
 - **Seed Control**: Reproducible results with seed parameter
 - **Model Caching**: Efficient model loading and reuse across generations
 - **Automatic Model Downloads**: Models are automatically downloaded to `ComfyUI/models/foley/` when needed
-- **Multiple Model Variants**: Support for different model sizes (XXL, Base, etc.)
+<img width="2014" height="1169" alt="image" src="https://github.com/user-attachments/assets/9d65fa60-51ce-4371-8652-0a09fcc88910" />
+
+## Features
+
+- **Text-Video-to-Audio Synthesis**: Generate realistic audio that matches your video content
+- **Flexible Text Prompts**: Use optional text descriptions to guide audio generation
+- **Multiple Samples**: Generate up to 6 different audio variations per inference
+- **Configurable Parameters**: Control guidance scale, inference steps, and sampling
+- **Seed Control**: Reproducible results with seed parameter
+- **Model Caching**: Efficient model loading and reuse across generations
+- **Automatic Model Downloads**: Models are automatically downloaded to `ComfyUI/models/foley/` when needed
 
 ## Installation
 
 1. **Clone this repository** into your ComfyUI custom_nodes directory:
    ```bash
    cd ComfyUI/custom_nodes
-   git clone <repository_url> ComfyUI_HunyuanVideoFoley
+   git clone https://github.com/yichengup/ComfyUI_ycHunyuanVideoFoley.git
    ```
 
 2. **Install dependencies**:
    ```bash
-   cd ComfyUI_HunyuanVideoFoley
+   cd ComfyUI_ycHunyuanVideoFoley
    pip install -r requirements.txt
    ```
 
@@ -63,25 +73,30 @@ Main node for generating audio from video and text.
 - **sample_nums**: Number of audio samples to generate (1-6, default: 1)
 - **seed**: Random seed for reproducibility (INT)
 - **model_path**: Path to pretrained models (optional, leave empty for auto-download)
-- **config_path**: Path to config file (optional, leave empty for default)
-- **auto_download**: Enable automatic model downloading (BOOLEAN, default: True)
-- **model_variant**: Choose model variant to download (dropdown, default: "hunyuanvideo-foley-xxl")
 
 **Outputs:**
 - **video_with_audio**: Video with generated audio merged (VIDEO)
 - **audio_only**: Generated audio file (AUDIO) 
 - **status_message**: Generation status and info (STRING)
 
-#### 2. HunyuanVideo-Foley Model Loader
-Separate node for loading models (useful for sharing models between multiple generator nodes).
+## ⚠ Important Limitations
 
-**Inputs:**
-- **model_path**: Path to pretrained models
-- **config_path**: Path to config file
+### **Frame Count & Duration Limits**
+- **Maximum Frames**: 450 frames (hard limit)
+- **Maximum Duration**: 15 seconds at 30fps
+- **Recommended**: Keep videos ≤15 seconds for best results
 
-**Outputs:**
-- **model**: Model handle for use with other nodes
-- **status_message**: Loading status
+### **FPS Recommendations**
+- **30fps**: Max 15 seconds (450 frames)
+- **24fps**: Max 18.75 seconds (450 frames)  
+- **15fps**: Max 30 seconds (450 frames)
+
+### **Long Video Solutions**
+For videos longer than 15 seconds:
+1. **Reduce FPS**: Lower FPS allows longer duration within frame limit
+2. **Segment Processing**: Split long videos into 15s segments
+3. **Audio Merging**: Combine generated audio segments in post-processing
+
 
 ## Example Workflow
 
@@ -105,32 +120,24 @@ configs/
 └── hunyuanvideo-foley-xxl.yaml     # Configuration file
 ```
 
-## Performance Notes
+## TODO
+- [x] ADD VHS INPUT/OUTPUTS (Thanks to YC)
+- [x] NEGATIVE PROMPT (Thanks to YC)  
+- [x] MODEL OFFLOADING OPS 
+- [ ] QUANTISE MODEL
 
-- **VRAM Usage**: The model requires significant GPU memory (recommended 16GB+ VRAM)
-- **Generation Time**: Audio generation can take several minutes depending on video length and settings
-- **Model Loading**: First run will download and cache models from HuggingFace if not present locally
 
-## Troubleshooting
+## Support
 
-### Common Issues:
+If you find this tool useful, please consider supporting my work by:
 
-1. **"Failed to import HunyuanVideo-Foley modules"**
-   - Ensure the parent HunyuanVideo-Foley package is properly installed
-   - Check that all dependencies are installed correctly
+- Starring this repository on GitHub
+- Subscribing to my YouTube channel: [Impact Frames](https://youtube.com/@impactframes?si=DrBu3tOAC2-YbEvc)
+- Following on X: [@ImpactFrames](https://x.com/ImpactFramesX)
 
-2. **"Model path does not exist"**
-   - Verify the model files are downloaded and in the correct directory
-   - Check the model_path parameter matches your model location
+You can also support by reporting issues or suggesting features. Your contributions help me bring updates and improvements to the project.
 
-3. **CUDA out of memory**
-   - Reduce the number of samples (`sample_nums`)
-   - Lower the number of inference steps
-   - Use CPU if GPU memory is insufficient
 
-4. **"Config path does not exist"**
-   - Ensure the config file is in the expected location
-   - Verify the config_path parameter is correct
 
 ## License
 
@@ -140,4 +147,7 @@ This custom node is based on the HunyuanVideo-Foley project. Please check the or
 
 Based on the HunyuanVideo-Foley project by Tencent. Original paper and code available at:
 - Paper: [HunyuanVideo-Foley: Text-Video-to-Audio Synthesis]
+
 - Code: [https://github.com/tencent/HunyuanVideo-Foley]
+
+<img src="https://count.getloli.com/get/@IFAI_HyVideoFoley?theme=moebooru" alt=":IFAIloadImages_comfy" />
