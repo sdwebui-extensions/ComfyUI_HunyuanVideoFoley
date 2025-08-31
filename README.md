@@ -112,7 +112,7 @@ For videos longer than 15 seconds:
 
 The node expects the following model structure:
 ```
-pretrained_models/
+ComfyUI\models\foley\hunyuanvideo-foley-xxl
 ├── hunyuanvideo_foley.pth          # Main Foley model
 ├── vae_128d_48k.pth                # DAC VAE model  
 └── synchformer_state_dict.pth      # Synchformer model
@@ -152,5 +152,6 @@ Based on the HunyuanVideo-Foley project by Tencent. Original paper and code avai
 - Code: [https://github.com/tencent/HunyuanVideo-Foley]
 
 <img src="https://count.getloli.com/get/@IFAI_HyVideoFoley?theme=moebooru" alt=":IFAIloadImages_comfy" />
+
 
 
