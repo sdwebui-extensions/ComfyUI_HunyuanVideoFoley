@@ -210,9 +210,10 @@ class HunyuanVideoFoleyNode:
                 config_path = os.path.join(current_dir, "configs", "hunyuanvideo-foley-xxl.yaml")
             
             # Check if models are already loaded with the same path and memory mode
+            # Also check for "preloaded" which means models came from pipeline
             if (cls._model_dict is not None and 
                 cls._cfg is not None and 
-                cls._model_path == model_path and
+                (cls._model_path == model_path or cls._model_path == "preloaded") and
                 cls._memory_efficient == memory_efficient):
                 return True, "Models already loaded"
             
@@ -347,13 +348,25 @@ class HunyuanVideoFoleyNode:
             # Set seed for reproducibility
             self.set_seed(seed)
             
-            # Load models if needed
-            success, message = self.load_models("", "", memory_efficient, cpu_offload)
-            if not success:
-                logger.error(f"Model loading failed: {message}")
+            # Check if models are already loaded (from pipeline or previous run)
+            if self._model_dict is None or self._cfg is None:
+                # Load models if needed
+                success, message = self.load_models("", "", memory_efficient, cpu_offload)
+                if not success:
+                    logger.error(f"Model loading failed: {message}")
+                    empty_audio = {"waveform": torch.zeros((1, 1, 48000)), "sample_rate": 48000}
+                    empty_frames = torch.zeros((1, 64, 64, 3), dtype=torch.float32)
+                    return ("", empty_frames, empty_audio, f"❌ {message}")
+            else:
+                logger.info("Using already loaded models")
+            
+            # Validate that models are loaded
+            if self._model_dict is None or self._cfg is None:
+                error_msg = "Models not loaded"
+                logger.error(error_msg)
                 empty_audio = {"waveform": torch.zeros((1, 1, 48000)), "sample_rate": 48000}
                 empty_frames = torch.zeros((1, 64, 64, 3), dtype=torch.float32)
-                return ("", empty_frames, empty_audio, f"❌ {message}")
+                return ("", empty_frames, empty_audio, f"❌ {error_msg}")
             
             # Validate inputs
             if video is None and images is None:
@@ -516,6 +529,16 @@ class HunyuanVideoFoleyModelLoader:
     def INPUT_TYPES(cls):
         return {
             "required": {
+                "quantization": (["none", "fp8_e4m3fn", "fp8_e5m2"], {
+                    "default": "none",
+                    "tooltip": "FP8 weight-only quantization for VRAM savings"
+                }),
+                "cpu_offload": ("BOOLEAN", {
+                    "default": False,
+                    "tooltip": "Offload models to CPU when not in use"
+                }),
+            },
+            "optional": {
                 "model_path": ("STRING", {
                     "default": "",
                     "multiline": False,
@@ -526,14 +549,6 @@ class HunyuanVideoFoleyModelLoader:
                     "multiline": False,
                     "placeholder": "Path to config file (leave empty for default)"
                 }),
-                "quantization": (["none", "fp8_e4m3fn", "fp8_e5m2"], {
-                    "default": "none",
-                    "tooltip": "FP8 weight-only quantization for VRAM savings"
-                }),
-                "cpu_offload": ("BOOLEAN", {
-                    "default": False,
-                    "tooltip": "Offload models to CPU when not in use"
-                }),
             }
         }
     
@@ -543,10 +558,10 @@ class HunyuanVideoFoleyModelLoader:
     CATEGORY = "HunyuanVideo-Foley/Loaders"
     DESCRIPTION = "Load HunyuanVideo-Foley model with optional FP8 quantization"
     
-    def load_model(self, model_path="", config_path="", quantization="none", cpu_offload=False):
+    def load_model(self, quantization="none", cpu_offload=False, model_path="", config_path=""):
         try:
             # Set default paths
-            if not model_path.strip():
+            if not model_path or not model_path.strip():
                 foley_models_dir = folder_paths.folder_names_and_paths.get("foley", [None])[0]
                 if foley_models_dir and len(foley_models_dir) > 0:
                     # Check for the model in the hunyuanvideo-foley-xxl subdirectory
@@ -555,9 +570,12 @@ class HunyuanVideoFoleyModelLoader:
                     current_dir = os.path.dirname(os.path.abspath(__file__))
                     model_path = os.path.join(current_dir, "pretrained_models")
             
-            if not config_path.strip():
+            if not config_path or not config_path.strip():
                 current_dir = os.path.dirname(os.path.abspath(__file__))
                 config_path = os.path.join(current_dir, "configs", "hunyuanvideo-foley-xxl.yaml")
+            
+            logger.info(f"Model path: {model_path}")
+            logger.info(f"Config path: {config_path}")
             
             # Setup device
             device = mm.get_torch_device()
@@ -627,7 +645,14 @@ class HunyuanVideoFoleyDependenciesLoader:
     def load_dependencies(self, model, load_text_encoder=True, load_feature_extractor=True):
         try:
             if model is None:
-                return (None, "❌ No model provided")
+                return (None, "❌ No model provided - check ModelLoader output")
+            
+            # Check if model is a tuple (from failed load)
+            if isinstance(model, tuple):
+                model = model[0]
+            
+            if model is None or not isinstance(model, dict):
+                return (None, "❌ Invalid model input - ModelLoader may have failed")
             
             deps = {
                 "model_dict": model["model_dict"],
@@ -686,34 +711,66 @@ class HunyuanVideoFoleyTorchCompile:
     def compile_model(self, dependencies, compile_vae=True, compile_mode="default", backend="inductor"):
         try:
             if dependencies is None:
-                return (None, "❌ No dependencies provided")
+                return (None, "❌ No dependencies provided - check DependenciesLoader output")
+            
+            # Check if dependencies is a tuple (from failed load)
+            if isinstance(dependencies, tuple):
+                dependencies = dependencies[0]
+            
+            if dependencies is None or not isinstance(dependencies, dict):
+                return (None, "❌ Invalid dependencies - previous node may have failed")
+            
+            # Handle AttributeDict or regular dict
+            model_dict = dependencies["model_dict"]
+            # Don't copy AttributeDict, just reference it
+            if hasattr(model_dict, '__class__') and 'AttributeDict' in str(model_dict.__class__):
+                model_dict_ref = model_dict
+            else:
+                model_dict_ref = model_dict.copy() if hasattr(model_dict, 'copy') else model_dict
             
             compiled = {
-                "model_dict": dependencies["model_dict"].copy(),
+                "model_dict": model_dict_ref,
                 "cfg": dependencies["cfg"],
                 "device": dependencies["device"],
                 "compiled": False
             }
             
-            if compile_vae and "vae" in compiled["model_dict"]:
-                logger.info(f"Compiling VAE with mode={compile_mode}, backend={backend}...")
+            # Check for dac_model (the actual VAE used in HunyuanVideo-Foley)
+            model_dict = compiled["model_dict"]
+            has_dac = hasattr(model_dict, 'dac_model') or (isinstance(model_dict, dict) and "dac_model" in model_dict)
+            
+            if compile_vae and has_dac:
+                logger.info(f"Compiling DAC VAE with mode={compile_mode}, backend={backend}...")
                 
                 import torch._dynamo as dynamo
                 dynamo.config.suppress_errors = True
                 
                 # Only compile if backend is not eager
                 if backend != "eager":
-                    compiled["model_dict"]["vae"] = torch.compile(
-                        compiled["model_dict"]["vae"],
+                    # Access dac_model correctly whether it's dict or AttributeDict
+                    if hasattr(model_dict, 'dac_model'):
+                        dac_model = model_dict.dac_model
+                    else:
+                        dac_model = model_dict["dac_model"]
+                    
+                    compiled_dac = torch.compile(
+                        dac_model,
                         mode=compile_mode,
                         backend=backend
                     )
+                    
+                    # Set the compiled model back
+                    if hasattr(model_dict, 'dac_model'):
+                        model_dict.dac_model = compiled_dac
+                    else:
+                        model_dict["dac_model"] = compiled_dac
+                    
                     compiled["compiled"] = True
-                    status = f"✅ Model compiled with {compile_mode}/{backend}"
+                    status = f"✅ DAC VAE compiled with {compile_mode}/{backend}"
                 else:
                     status = "✅ Model ready (eager mode - no compilation)"
             else:
-                status = "✅ Model ready (no compilation)"
+                status = "✅ Model ready (no VAE compilation)"
             
             return (compiled, status)
             
@@ -754,13 +811,21 @@ class HunyuanVideoFoleyGeneratorAdvanced(HunyuanVideoFoleyNode):
         
         # If compiled model provided, use it
         if compiled_model is not None:
-            self._model_dict = compiled_model["model_dict"]
-            self._cfg = compiled_model["cfg"]
-            self._device = compiled_model["device"]
-            self._model_path = "preloaded"
-            self._memory_efficient = memory_efficient
+            # Check if compiled_model is a tuple (from node output)
+            if isinstance(compiled_model, tuple):
+                compiled_model = compiled_model[0]
             
-            logger.info("Using pre-loaded/compiled model")
+            if compiled_model and isinstance(compiled_model, dict):
+                # Set class-level variables to prevent reloading
+                self.__class__._model_dict = compiled_model["model_dict"]
+                self.__class__._cfg = compiled_model["cfg"]
+                self.__class__._device = compiled_model["device"]
+                self.__class__._model_path = "preloaded"
+                self.__class__._memory_efficient = memory_efficient
+                
+                logger.info("Using pre-loaded/compiled model")
+            else:
+                logger.warning("Invalid compiled model provided, will load fresh")
         
         # Call parent generate_audio
         return self.generate_audio(
