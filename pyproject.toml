@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "hunyuanvideo-foley" # Unique identifier for your node. Immutable after creation.
 description = "ComfyUI custom node for HunyuanVideo-Foley text-video-to-audio synthesis"
-version = "1.0.1" # Custom Node version. Must be semantically versioned.
+version = "1.0.2" # Custom Node version. Must be semantically versioned.
 license = { file = "LICENSE.txt" }
 dependencies  = [] # Filled in from requirements.txt
 
@@ -16,6 +16,7 @@ Repository = "https://github.com/if-ai/ComfyUI_HunyuanVideoFoley"
 PublisherId = "impactframes" # TODO (fill in Publisher ID from Comfy Registry Website).
 DisplayName = "HunyuanVideo-Foley" # Display name for the Custom Node. Can be changed later.
 Icon = "https://example.com/icon.png" # SVG, PNG, JPG or GIF (MAX. 800x400px)
+
 
 
 
