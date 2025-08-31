@@ -11,7 +11,8 @@ This is a ComfyUI custom node wrapper for the HunyuanVideo-Foley model, which ge
 - **Seed Control**: Reproducible results with seed parameter
 - **Model Caching**: Efficient model loading and reuse across generations
 - **Automatic Model Downloads**: Models are automatically downloaded to `ComfyUI/models/foley/` when needed
-<img width="2014" height="1169" alt="image" src="https://github.com/user-attachments/assets/9d65fa60-51ce-4371-8652-0a09fcc88910" />
+<img width="2560" height="1440" alt="image" src="https://github.com/user-attachments/assets/cace6b70-0eb7-4eda-a4f5-c21c95559b38" />
+
 
 ## Features
 
@@ -151,4 +152,5 @@ Based on the HunyuanVideo-Foley project by Tencent. Original paper and code avai
 - Code: [https://github.com/tencent/HunyuanVideo-Foley]
 
 <img src="https://count.getloli.com/get/@IFAI_HyVideoFoley?theme=moebooru" alt=":IFAIloadImages_comfy" />
+
 
