@@ -124,7 +124,8 @@ configs/
 ## TODO
 - [x] ADD VHS INPUT/OUTPUTS (Thanks to YC)
 - [x] NEGATIVE PROMPT (Thanks to YC)  
-- [x] MODEL OFFLOADING OPS 
+- [x] MODEL OFFLOADING OPS
+- [x] TORCH COMPILE
 - [ ] QUANTISE MODEL
 
 
@@ -152,6 +153,7 @@ Based on the HunyuanVideo-Foley project by Tencent. Original paper and code avai
 - Code: [https://github.com/tencent/HunyuanVideo-Foley]
 
 <img src="https://count.getloli.com/get/@IFAI_HyVideoFoley?theme=moebooru" alt=":IFAIloadImages_comfy" />
+
 
 
 
