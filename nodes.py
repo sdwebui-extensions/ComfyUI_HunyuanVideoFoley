@@ -152,6 +152,16 @@ class HunyuanVideoFoleyNode:
                     "display": "checkbox",
                     "tooltip": "Offload models to CPU when not in use (slower but saves VRAM)"
                 }),
+                "enabled": ("BOOLEAN", {
+                    "default": True,
+                    "display": "checkbox",
+                    "tooltip": "Enable or disable the entire audio generation process. If false, returns a silent or null audio output."
+                }),
+                "silent_audio": ("BOOLEAN", {
+                    "default": True,
+                    "display": "checkbox",
+                    "tooltip": "If true, returns a silent audio clip when disabled or on failure. If false, returns None."
+                }),
             }
         }
     
@@ -333,6 +343,7 @@ class HunyuanVideoFoleyNode:
         except Exception as e:
             return None, f"Error converting images to video: {str(e)}"
     
+    # In HunyuanVideoFoleyNode class:
     @torch.inference_mode()
     def generate_audio(self, text_prompt: str, guidance_scale: float, 
                       num_inference_steps: int, sample_nums: int, seed: int,
@@ -342,37 +353,48 @@ class HunyuanVideoFoleyNode:
                       output_folder: str = "hunyuan_foley",
                       filename_prefix: str = "foley_",
                       memory_efficient: bool = False,
-                      cpu_offload: bool = False):
+                      cpu_offload: bool = False,
+                      enabled: bool = True,
+                      silent_audio: bool = True):
         """Generate audio for the input video/images with the given text prompt"""
+        
+        # Helper function to create return values on a clean exit or a caught failure.
+        def create_exit_values(message="Process skipped or failed."):
+            if silent_audio:
+                audio_output = {"waveform": torch.zeros((1, 1, 1)), "sample_rate": 48000}
+            else:
+                audio_output = None
+            
+            empty_frames = torch.zeros((1, 1, 1, 3), dtype=torch.float32)
+            return ("", empty_frames, audio_output, message)
+                
+        # 1. Enabled/Disabled Short-Circuit
+        if not enabled:
+            logger.info("HunyuanVideo-Foley node is disabled. Skipping execution.")
+            _, frames, audio, _ = create_exit_values()
+            return ("", frames, audio, "✅ Node disabled. Skipped.")
+        
+        # 2. Robust Error Handling Wrapper
         try:
             # Set seed for reproducibility
             self.set_seed(seed)
             
-            # Check if models are already loaded (from pipeline or previous run)
+            # Load models if needed.
             if self._model_dict is None or self._cfg is None:
-                # Load models if needed
                 success, message = self.load_models("", "", memory_efficient, cpu_offload)
                 if not success:
-                    logger.error(f"Model loading failed: {message}")
-                    empty_audio = {"waveform": torch.zeros((1, 1, 48000)), "sample_rate": 48000}
-                    empty_frames = torch.zeros((1, 64, 64, 3), dtype=torch.float32)
-                    return ("", empty_frames, empty_audio, f"❌ {message}")
+                    # Instead of returning, raise an exception to be caught by our handler.
+                    raise Exception(f"Model loading failed: {message}")
             else:
                 logger.info("Using already loaded models")
             
             # Validate that models are loaded
             if self._model_dict is None or self._cfg is None:
-                error_msg = "Models not loaded"
-                logger.error(error_msg)
-                empty_audio = {"waveform": torch.zeros((1, 1, 48000)), "sample_rate": 48000}
-                empty_frames = torch.zeros((1, 64, 64, 3), dtype=torch.float32)
-                return ("", empty_frames, empty_audio, f"❌ {error_msg}")
+                raise Exception("Models not loaded")
             
             # Validate inputs
             if video is None and images is None:
-                empty_audio = {"waveform": torch.zeros((1, 1, 48000)), "sample_rate": 48000}
-                empty_frames = torch.zeros((1, 64, 64, 3), dtype=torch.float32)
-                return ("", empty_frames, empty_audio, "❌ Please provide either video or images input!")
+                raise Exception("Please provide either video or images input!")
             
             # Determine video file path
             video_file = None
@@ -384,123 +406,91 @@ class HunyuanVideoFoleyNode:
                 video_file, convert_msg = self._extract_frames_from_image_input(images, fps)
                 temp_video_created = True
                 if video_file is None:
-                    empty_audio = {"waveform": torch.zeros((1, 1, 48000)), "sample_rate": 48000}
-                    empty_frames = torch.zeros((1, 64, 64, 3), dtype=torch.float32)
-                    return ("", empty_frames, empty_audio, f"❌ {convert_msg}")
+                    raise Exception(convert_msg)
             
             if video_file is None or not os.path.exists(video_file):
-                empty_audio = {"waveform": torch.zeros((1, 1, 48000)), "sample_rate": 48000}
-                empty_frames = torch.zeros((1, 64, 64, 3), dtype=torch.float32)
-                return ("", empty_frames, empty_audio, "❌ Video file not found")
+                raise Exception("Video file not found")
             
-            # Process features
+            # --- Main Logic (original code) ---
             logger.info("Processing video features...")
             visual_feats, text_feats, audio_len_in_s = feature_process(
-                video_file,
-                text_prompt,
-                self._model_dict,
-                self._cfg
+                video_file, text_prompt, self._model_dict, self._cfg
             )
             
-            # Generate audio
             logger.info("Generating audio...")
             audio, sample_rate = denoise_process(
-                visual_feats,
-                text_feats,
-                audio_len_in_s,
-                self._model_dict,
-                self._cfg,
-                guidance_scale=guidance_scale,
-                num_inference_steps=num_inference_steps,
-                batch_size=sample_nums
+                visual_feats, text_feats, audio_len_in_s, self._model_dict, self._cfg,
+                guidance_scale=guidance_scale, num_inference_steps=num_inference_steps, batch_size=sample_nums
             )
             
-            # Create output directory
             output_dir = os.path.join(folder_paths.get_output_directory(), output_folder)
             os.makedirs(output_dir, exist_ok=True)
             
-            # Generate timestamp for unique filename
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            
-            # Save audio file
             audio_filename = f"{filename_prefix}audio_{timestamp}_{seed}.wav"
-            audio_output = os.path.join(output_dir, audio_filename)
-            torchaudio.save(audio_output, audio[0], sample_rate)
+            audio_output_path = os.path.join(output_dir, audio_filename)
+            torchaudio.save(audio_output_path, audio[0], sample_rate)
             
-            # Create audio result dict
             audio_tensor = audio[0].unsqueeze(0)
             if len(audio_tensor.shape) == 2:
                 audio_tensor = audio_tensor.unsqueeze(1)
             audio_result = {"waveform": audio_tensor, "sample_rate": sample_rate}
             
-            # Handle output formats
             video_output_path = ""
-            video_frames = torch.zeros((1, 64, 64, 3), dtype=torch.float32)
+            video_frames = torch.zeros((1, 1, 1, 3), dtype=torch.float32)
             
             if output_format in ["video_path", "both"]:
                 video_filename = f"{filename_prefix}video_{timestamp}_{seed}.mp4"
                 video_output_path = os.path.join(output_dir, video_filename)
-                
                 try:
-                    merge_audio_video(audio_output, video_file, video_output_path)
+                    merge_audio_video(audio_output_path, video_file, video_output_path)
                     logger.info(f"Created video with audio: {video_output_path}")
                 except Exception as e:
                     logger.error(f"Failed to merge audio and video: {e}")
                     video_output_path = video_file
             
             if output_format in ["frames", "both"]:
-                # Extract frames for output
                 try:
                     import cv2
                     cap = cv2.VideoCapture(video_file)
                     frames_list = []
-                    
                     while True:
                         ret, frame = cap.read()
-                        if not ret:
-                            break
+                        if not ret: break
                         frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                         frame_normalized = np.array(frame_rgb, dtype=np.float32) / 255.0
                         frames_list.append(frame_normalized)
-                    
                     cap.release()
-                    
                     if frames_list:
                         video_frames = torch.from_numpy(np.stack(frames_list))
                         logger.info(f"Extracted {len(frames_list)} frames")
                 except Exception as e:
                     logger.warning(f"Could not extract frames: {e}")
             
-            # Cleanup
             if temp_video_created and os.path.exists(video_file):
-                try:
-                    os.remove(video_file)
-                except:
-                    pass
+                try: os.remove(video_file)
+                except: pass
             
-            # Memory cleanup if requested
             if memory_efficient:
-                # Clear intermediate variables
                 del visual_feats, text_feats, audio
-                
-                # Force garbage collection
                 import gc
                 gc.collect()
-                
-                # Clear CUDA cache
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
+                if torch.cuda.is_available(): torch.cuda.empty_cache()
             
             success_msg = f"✅ Generated audio successfully"
             return (video_output_path, video_frames, audio_result, success_msg)
             
         except Exception as e:
+            # This is our single, centralized catch block.
+            import traceback
             error_msg = f"❌ Generation failed: {str(e)}"
             logger.error(error_msg)
-            empty_audio = {"waveform": torch.zeros((1, 1, 48000)), "sample_rate": 48000}
-            empty_frames = torch.zeros((1, 64, 64, 3), dtype=torch.float32)
-            return ("", empty_frames, empty_audio, error_msg)
-
+            logger.error(traceback.format_exc()) # Log the full error for debugging
+            
+            # Use the helper to return the correct output based on the silent_audio flag.
+            _, frames, audio, _ = create_exit_values(error_msg)
+            return ("", frames, audio, error_msg)
+        
 class LinearFP8Wrapper(nn.Module):
     """FP8 quantization wrapper for linear layers"""
     def __init__(self, original_linear, dtype="fp8_e4m3fn"):
@@ -790,7 +780,19 @@ class HunyuanVideoFoleyGeneratorAdvanced(HunyuanVideoFoleyNode):
         
         # Add optional compiled model input
         base_inputs["optional"]["compiled_model"] = ("FOLEY_COMPILED",)
-        
+        # --- QoL FIELDS HERE ---
+        base_inputs["optional"]["enabled"] = ("BOOLEAN", {
+            "default": True,
+            "display": "checkbox",
+            "tooltip": "Enable or disable this node. If disabled, it will pass through silent audio."
+        })
+        base_inputs["optional"]["silent_audio"] = ("BOOLEAN", {
+            "default": True,
+            "display": "checkbox",
+            "tooltip": "If true, returns a silent audio clip when disabled or on failure. If false, returns None."
+        })
+        # -----------------------------
+
         return base_inputs
     
     FUNCTION = "generate_audio_advanced"
@@ -806,9 +808,28 @@ class HunyuanVideoFoleyGeneratorAdvanced(HunyuanVideoFoleyNode):
                                filename_prefix="foley_",
                                memory_efficient=False,
                                cpu_offload=False,
-                               compiled_model=None):
+                               compiled_model=None,
+                               # Add your new parameters here
+                               enabled: bool = True,
+                               silent_audio: bool = True):
         """Generate audio using either compiled model or loading fresh"""
         
+        # --- Helper function for clean exits/failures ---
+        def create_exit_values(message="Process skipped or failed."):
+            if silent_audio:
+                audio_output = {"waveform": torch.zeros((1, 1, 1)), "sample_rate": 48000}
+            else:
+                audio_output = None
+            
+            empty_frames = torch.zeros((1, 1, 1, 3), dtype=torch.float32)
+            return ("", empty_frames, audio_output, message)
+        
+        # 1. Enabled/Disabled Short-Circuit
+        if not enabled:
+            logger.info("HunyuanVideo-Foley node is disabled. Skipping execution.")
+            _, frames, audio, _ = create_exit_values()
+            return ("", frames, audio, "✅ Node disabled. Skipped.")
+                
         # If compiled model provided, use it
         if compiled_model is not None:
             # Check if compiled_model is a tuple (from node output)
@@ -827,12 +848,21 @@ class HunyuanVideoFoleyGeneratorAdvanced(HunyuanVideoFoleyNode):
             else:
                 logger.warning("Invalid compiled model provided, will load fresh")
         
-        # Call parent generate_audio
-        return self.generate_audio(
-            text_prompt, guidance_scale, num_inference_steps, sample_nums, seed,
-            video, images, fps, negative_prompt, output_format,
-            output_folder, filename_prefix, memory_efficient, cpu_offload
-        )
+        try:
+            # Call parent generate_audio
+            return self.generate_audio(
+                text_prompt, guidance_scale, num_inference_steps, sample_nums, seed,
+                video, images, fps, negative_prompt, output_format,
+                output_folder, filename_prefix, memory_efficient, cpu_offload, enabled, silent_audio
+            )
+        except Exception as e:
+            import traceback
+            error_msg = f"❌ Generation failed: {str(e)}"
+            logger.error(error_msg)
+            logger.error(traceback.format_exc())
+            
+            _, frames, audio, _ = create_exit_values(error_msg)
+            return ("", frames, audio, error_msg)
 
 # Node mappings for ComfyUI
 NODE_CLASS_MAPPINGS = {
