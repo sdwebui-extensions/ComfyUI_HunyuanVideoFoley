@@ -50,7 +50,7 @@ if "foley" not in folder_paths.folder_names_and_paths:
 # Import the HunyuanVideo-Foley modules
 try:
     from hunyuanvideo_foley.utils.model_utils import load_model, denoise_process
-    from hunyuanvideo_foley.utils.feature_utils import feature_process
+    from .utils import feature_process_unified, extract_video_path
     from hunyuanvideo_foley.utils.media_utils import merge_audio_video
 except ImportError as e:
     logger.error(f"Failed to import HunyuanVideo-Foley modules: {e}")
@@ -203,6 +203,14 @@ class HunyuanVideoFoleyNode:
                    memory_efficient: bool = False, cpu_offload: bool = False) -> Tuple[bool, str]:
         """Load models if not already loaded or if path changed"""
         try:
+            # Proactively clear VRAM before attempting to load our models.
+            if cpu_offload or memory_efficient:
+                logger.info("Proactively unloading other models to make space...")
+                mm.unload_all_models()
+                import gc; gc.collect()
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache() 
+
             # Set default paths if empty
             if not model_path.strip():
                 # Try ComfyUI foley models directory first
@@ -262,27 +270,7 @@ class HunyuanVideoFoleyNode:
             torch.cuda.manual_seed(seed)
             torch.cuda.manual_seed_all(seed)
     
-    @staticmethod
-    def _extract_video_path(video):
-        """Extract a file path from various potential video input types"""
-        # Handle ComfyUI VideoFromFile object
-        if hasattr(video, '__class__') and 'VideoFromFile' in video.__class__.__name__:
-            if hasattr(video, '_VideoFromFile__file'):
-                return getattr(video, '_VideoFromFile__file')
-            for attr in ['file', 'path', 'filename']:
-                if hasattr(video, attr):
-                    value = getattr(video, attr)
-                    if isinstance(value, str):
-                        return value
-        
-        # Direct string path
-        if isinstance(video, str):
-            return video
-        elif isinstance(video, dict) and 'path' in video:
-            return video['path']
-        
-        return None
-    
+
     @classmethod
     def _extract_frames_from_image_input(cls, images, fps=24.0):
         """Convert IMAGE input to video frames and create a temporary video file"""
@@ -397,26 +385,34 @@ class HunyuanVideoFoleyNode:
                 raise Exception("Please provide either video or images input!")
             
             # Determine video file path
-            video_file = None
-            temp_video_created = False
-            
-            if video is not None:
-                video_file = self._extract_video_path(video)
-            elif images is not None:
-                video_file, convert_msg = self._extract_frames_from_image_input(images, fps)
-                temp_video_created = True
-                if video_file is None:
-                    raise Exception(convert_msg)
-            
-            if video_file is None or not os.path.exists(video_file):
-                raise Exception("Video file not found")
-            
-            # --- Main Logic (original code) ---
-            logger.info("Processing video features...")
-            visual_feats, text_feats, audio_len_in_s = feature_process(
-                video_file, text_prompt, self._model_dict, self._cfg
+            logger.info("Processing media features...")
+            visual_feats, text_feats, audio_len_in_s = feature_process_unified(
+                video_input=video,
+                image_input=images,
+                prompt=text_prompt,
+                model_dict=self._model_dict,
+                cfg=self._cfg,
+                fps_hint=fps
             )
             
+            # Ensure the core models for denoising are on the correct device before processing.
+            # --- State Correction and VRAM Management for Denoising ---
+            target_device = self._device
+            logger.info(f"Preparing for denoising on device: {target_device}")
+
+            # 1. Offload the large feature tensors to CPU to make space.
+            visual_feats['siglip2_feat'] = visual_feats['siglip2_feat'].to("cpu")
+            visual_feats['syncformer_feat'] = visual_feats['syncformer_feat'].to("cpu")
+            text_feats['text_feat'] = text_feats['text_feat'].to("cpu")
+            text_feats['uncond_text_feat'] = text_feats['uncond_text_feat'].to("cpu")
+            logger.info("Feature tensors moved to CPU.")
+
+            # 2. Now that VRAM is clear, move the core models to the GPU.
+            self._model_dict.foley_model.to(target_device)
+            self._model_dict.dac_model.to(target_device)
+            logger.info("Core models moved to GPU.")
+            # --- End of Fix ---
+
             logger.info("Generating audio...")
             audio, sample_rate = denoise_process(
                 visual_feats, text_feats, audio_len_in_s, self._model_dict, self._cfg,
@@ -436,6 +432,20 @@ class HunyuanVideoFoleyNode:
                 audio_tensor = audio_tensor.unsqueeze(1)
             audio_result = {"waveform": audio_tensor, "sample_rate": sample_rate}
             
+            video_file = None
+            temp_video_created = False
+            
+            if video is not None:
+                video_file = extract_video_path(video)
+            elif images is not None:
+                # If the input was an image tensor, we must create a temporary video file
+                # so that merge_audio_video has a video stream to work with.
+                video_file, _ = self._extract_frames_from_image_input(images, fps)
+                temp_video_created = True
+
+            if video_file is None:
+                logger.warning("No valid video file path found for output merging/frame extraction.")
+                
             video_output_path = ""
             video_frames = torch.zeros((1, 1, 1, 3), dtype=torch.float32)
             
@@ -490,6 +500,30 @@ class HunyuanVideoFoleyNode:
             # Use the helper to return the correct output based on the silent_audio flag.
             _, frames, audio, _ = create_exit_values(error_msg)
             return ("", frames, audio, error_msg)
+        
+        finally:
+            logger.info("HunyuanVideo-Foley: Starting guaranteed cleanup...")
+            if memory_efficient or cpu_offload:
+                if self._model_dict:
+                    logger.info("Offloading models to CPU...")
+                    for model_name, model_obj in self._model_dict.items():
+                        if hasattr(model_obj, 'to'):
+                            try:
+                                model_obj.to("cpu")
+                            except Exception:
+                                pass
+                
+                if memory_efficient:
+                    logger.info("Memory efficient mode: Unloading models completely.")
+                    self._model_dict = None
+                    self._cfg = None
+                    self._model_path = None
+
+            import gc
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            logger.info("HunyuanVideo-Foley: Cleanup complete.")
         
 class LinearFP8Wrapper(nn.Module):
     """FP8 quantization wrapper for linear layers"""
