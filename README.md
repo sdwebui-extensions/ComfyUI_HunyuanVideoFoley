@@ -74,6 +74,8 @@ Main node for generating audio from video and text.
 - **sample_nums**: Number of audio samples to generate (1-6, default: 1)
 - **seed**: Random seed for reproducibility (INT)
 - **model_path**: Path to pretrained models (optional, leave empty for auto-download)
+- **enabled**: Enable or disable the entire node. If disabled, it will pass through a silent or null audio output without processing. (BOOLEAN, default: True)
+- **silent_audio**: Controls the output when the node is disabled or fails. If true, it outputs a silent audio clip. If false, it outputs `None`. (BOOLEAN, default: True)
 
 **Outputs:**
 - **video_with_audio**: Video with generated audio merged (VIDEO)
