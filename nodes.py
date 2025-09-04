@@ -353,20 +353,19 @@ class HunyuanVideoFoleyNode:
                 message="✅ Node disabled. Skipped."
             )
         
-        # 2. Robust Error Handling Wrapper
+                # In the generate_audio function:
         try:
-            # Set seed for reproducibility
             self.set_seed(seed)
-            
-            # --- Proactive VRAM Cleanup ---
+
+            # Proactive VRAM Cleanup (This part is correct)
             logger.info("Performing pre-run VRAM cleanup...")
             mm.unload_all_models()
             import gc; gc.collect()
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
-            # --- End of Fix ---
-
-            # If the class doesn't have a model dictionary, it must be loaded.
+            
+            # --- CORRECTED MODEL LOADING LOGIC ---
+            # This is the single source of truth for loading/validating models.
             if self._model_dict is None or self._cfg is None:
                 logger.info("No models loaded, attempting to load fresh...")
                 success, message = self.load_models(memory_efficient=memory_efficient, cpu_offload=cpu_offload)
@@ -375,10 +374,11 @@ class HunyuanVideoFoleyNode:
             else:
                 logger.info("Using pre-loaded models from class state.")
             
-            # Validate that models are loaded
+            # Final validation check after attempting to load/use pre-loaded.
             if self._model_dict is None or self._cfg is None:
-                raise Exception("Models not loaded")
-            
+                raise Exception("Models not loaded, and fallback loading failed.")
+            # --- END OF FIX ---
+
             # Validate inputs
             if video is None and images is None:
                 raise Exception("Please provide either video or images input!")
