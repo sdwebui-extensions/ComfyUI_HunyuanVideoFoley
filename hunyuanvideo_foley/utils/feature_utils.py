@@ -68,7 +68,16 @@ def encode_video_with_siglip2(x: torch.Tensor, model_dict, batch_size: int = -1)
     x = rearrange(x, "b t c h w -> (b t) c h w")
     outputs = []
     for i in range(0, b * t, batch_size):
-        outputs.append(model_dict.siglip2_model.get_image_features(pixel_values=x[i : i + batch_size]))
+        pixel_values = x[i : i + batch_size]
+        # --- Transformers Compatibility Fix ---
+        if hasattr(model_dict.siglip2_model, 'get_image_features'):
+            # Older transformers versions
+            features = model_dict.siglip2_model.get_image_features(pixel_values=pixel_values)
+        else:
+            # Newer transformers versions
+            features = model_dict.siglip2_model(pixel_values=pixel_values).image_embeds
+        outputs.append(features)
+        # --- End of Fix ---
     res = torch.cat(outputs, dim=0)
     res = rearrange(res, "(b t) d -> b t d", b=b)
     return res

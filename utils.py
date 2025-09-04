@@ -183,7 +183,7 @@ def _encode_visual_features_safely(frames_uint8, model_dict, fps_hint):
     audio_len_in_s = len(frames_uint8) / fps_hint
     return AttributeDict(visual_features), audio_len_in_s
 
-def feature_process_unified(video_input, image_input, prompt, model_dict, cfg, fps_hint=24.0, max_frames=450):
+def feature_process_unified(video_input, image_input, prompt, model_dict, cfg, negative_prompt="", fps_hint=24.0, max_frames=450):
     """ Unified, memory-safe feature processing for either a video path or an image tensor. """
     frames_uint8 = None; fps = fps_hint
     
@@ -206,7 +206,9 @@ def feature_process_unified(video_input, image_input, prompt, model_dict, cfg, f
 
     visual_feats, audio_len_in_s = _encode_visual_features_safely(frames_uint8, model_dict, fps)
 
-    neg_prompt = cfg.get("neg_prompt", "noisy, harsh")
+    # Use the provided negative prompt, or fall back to a default.
+    neg_prompt = negative_prompt if negative_prompt and negative_prompt.strip() else "noisy, harsh"
+    
     prompts = [neg_prompt, prompt]
     clap_model = model_dict.clap_model
     try:
