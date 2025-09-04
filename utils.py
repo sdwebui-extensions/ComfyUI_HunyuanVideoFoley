@@ -9,6 +9,7 @@ import numpy as np
 from typing import Union, Optional, Tuple
 from loguru import logger
 import decord
+from tqdm import tqdm
 from PIL import Image
 from einops import rearrange
 
@@ -171,9 +172,9 @@ def _encode_visual_features_safely(frames_uint8, model_dict, fps_hint):
     try:
         logger.info("Moving Syncformer to device for feature extraction...")
         model_dict.syncformer_model.to(dev)
-        # Correctly preprocess frames for syncformer as per original library logic
-        images = torch.from_numpy(np.array(frames_uint8)).permute(0, 3, 1, 2)
-        sync_frames = model_dict.syncformer_preprocess(images).unsqueeze(0).to(dev)
+        # Correctly preprocess frames for syncformer one by one
+        sync_list = [model_dict.syncformer_preprocess(im) for im in pil_list]
+        sync_frames = torch.stack(sync_list, dim=0).unsqueeze(0).to(dev)
         visual_features['syncformer_feat'] = encode_video_with_sync(sync_frames, model_dict)
     finally:
         logger.info("Offloading Syncformer from device."); model_dict.syncformer_model.to("cpu")
@@ -222,3 +223,117 @@ def feature_process_unified(video_input, image_input, prompt, model_dict, cfg, f
 
     text_feats = AttributeDict({'text_feat': text_feat, 'uncond_text_feat': uncond_text_feat})
     return visual_feats, text_feats, audio_len_in_s
+
+# In utils.py, add this entire block at the end of the file
+
+from diffusers.utils.torch_utils import randn_tensor
+from hunyuanvideo_foley.utils.schedulers.scheduling_flow_match_discrete import FlowMatchDiscreteScheduler
+
+def _retrieve_timesteps(scheduler, num_inference_steps, device, **kwargs):
+    """ Helper function forked from the library's pipeline.py """
+    scheduler.set_timesteps(num_inference_steps, device=device, **kwargs)
+    timesteps = scheduler.timesteps
+    return timesteps, num_inference_steps
+
+def _prepare_latents(scheduler, batch_size, num_channels_latents, length, dtype, device):
+    """ Helper function forked from the library's pipeline.py """
+    shape = (batch_size, num_channels_latents, int(length))
+    latents = randn_tensor(shape, device=device, dtype=dtype)
+    if hasattr(scheduler, "init_noise_sigma"):
+        latents = latents * scheduler.init_noise_sigma
+    return latents
+
+def denoise_process_safely(visual_feats, text_feats, audio_len_in_s, model_dict, cfg, **kwargs):
+    """ Memory-safe fork of denoise_process that ensures all tensors are on the correct device. """
+    target_dtype = model_dict.foley_model.dtype
+    autocast_enabled = target_dtype != torch.float32
+    device = model_dict.device
+
+    # --- Device Correction Fix ---
+    visual_feats.siglip2_feat = visual_feats.siglip2_feat.to(device)
+    visual_feats.syncformer_feat = visual_feats.syncformer_feat.to(device)
+    text_feats.text_feat = text_feats.text_feat.to(device)
+    text_feats.uncond_text_feat = text_feats.uncond_text_feat.to(device)
+    # --- End of Fix ---
+    
+    guidance_scale = kwargs.get('guidance_scale', 4.5)
+    num_inference_steps = kwargs.get('num_inference_steps', 50)
+    batch_size = kwargs.get('batch_size', 1)
+
+    scheduler = FlowMatchDiscreteScheduler(
+        shift=cfg.diffusion_config.sample_flow_shift,
+        reverse=cfg.diffusion_config.flow_reverse,
+        solver=cfg.diffusion_config.flow_solver,
+        use_flux_shift=cfg.diffusion_config.sample_use_flux_shift,
+        flux_base_shift=cfg.diffusion_config.flux_base_shift,
+        flux_max_shift=cfg.diffusion_config.flux_max_shift,
+    )
+
+    timesteps, _ = _retrieve_timesteps(scheduler, num_inference_steps, device)
+
+    latents = _prepare_latents(
+        scheduler, batch_size=batch_size,
+        num_channels_latents=cfg.model_config.model_kwargs.audio_vae_latent_dim,
+        length=audio_len_in_s * cfg.model_config.model_kwargs.audio_frame_rate,
+        dtype=target_dtype, device=device,
+    )
+
+    for i, t in tqdm(enumerate(timesteps), total=len(timesteps), desc="Denoising steps"):
+        latent_input = torch.cat([latents] * 2) if guidance_scale > 1.0 else latents
+        latent_input = scheduler.scale_model_input(latent_input, t)
+        t_expand = t.repeat(latent_input.shape[0])
+
+        siglip2_feat = visual_feats.siglip2_feat.repeat(batch_size, 1, 1)
+        uncond_siglip2_feat = model_dict.foley_model.get_empty_clip_sequence(bs=batch_size, len=siglip2_feat.shape[1]).to(device)
+        siglip2_feat_input = torch.cat([uncond_siglip2_feat, siglip2_feat], dim=0) if guidance_scale > 1.0 else siglip2_feat
+
+        syncformer_feat = visual_feats.syncformer_feat.repeat(batch_size, 1, 1)
+        uncond_syncformer_feat = model_dict.foley_model.get_empty_sync_sequence(bs=batch_size, len=syncformer_feat.shape[1]).to(device)
+        syncformer_feat_input = torch.cat([uncond_syncformer_feat, syncformer_feat], dim=0) if guidance_scale > 1.0 else syncformer_feat
+
+        text_feat_repeated = text_feats.text_feat.repeat(batch_size, 1, 1)
+        uncond_text_feat_repeated = text_feats.uncond_text_feat.repeat(batch_size, 1, 1)
+        text_feat_input = torch.cat([uncond_text_feat_repeated, text_feat_repeated], dim=0) if guidance_scale > 1.0 else text_feat_repeated
+
+        with torch.autocast(device_type=device.type, enabled=autocast_enabled, dtype=target_dtype):
+            noise_pred = model_dict.foley_model(
+                x=latent_input, t=t_expand, cond=text_feat_input,
+                clip_feat=siglip2_feat_input, sync_feat=syncformer_feat_input,
+                return_dict=True,
+            )["x"]
+
+        noise_pred = noise_pred.to(dtype=torch.float32)
+
+        if guidance_scale > 1.0:
+            noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
+            noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond)
+
+        latents = scheduler.step(noise_pred, t, latents, return_dict=False)[0]
+
+    with torch.no_grad():
+        audio = model_dict.dac_model.decode(latents)
+        audio = audio.float().cpu()
+
+    audio = audio[:, :int(audio_len_in_s * model_dict.dac_model.sample_rate)]
+    return audio, model_dict.dac_model.sample_rate
+
+
+# In utils.py, add this function
+
+def create_node_exit_values(silent_audio, passthrough_video=None, passthrough_images=None, message="Process skipped or failed."):
+    """
+    Creates a standardized tuple of return values for exiting a node early.
+    Handles passthrough of video or image inputs.
+    """
+    audio_output = {"waveform": torch.zeros((1, 1, 1)), "sample_rate": 48000} if silent_audio else None
+    
+    # Prioritize passing through the image tensor if it exists
+    if passthrough_images is not None:
+        frames_output = passthrough_images
+    else:
+        frames_output = torch.zeros((1, 1, 1, 3), dtype=torch.float32)
+        
+    # Pass through the video path if it exists
+    video_path_output = extract_video_path(passthrough_video) if passthrough_video else ""
+    
+    return (video_path_output, frames_output, audio_output, message)

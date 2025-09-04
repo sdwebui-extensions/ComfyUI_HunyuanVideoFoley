@@ -49,8 +49,9 @@ if "foley" not in folder_paths.folder_names_and_paths:
 
 # Import the HunyuanVideo-Foley modules
 try:
-    from hunyuanvideo_foley.utils.model_utils import load_model, denoise_process
-    from .utils import feature_process_unified, extract_video_path
+    from hunyuanvideo_foley.utils.model_utils import load_model
+    from .utils import denoise_process_safely
+    from .utils import feature_process_unified, extract_video_path, create_node_exit_values
     from hunyuanvideo_foley.utils.media_utils import merge_audio_video
 except ImportError as e:
     logger.error(f"Failed to import HunyuanVideo-Foley modules: {e}")
@@ -203,13 +204,6 @@ class HunyuanVideoFoleyNode:
                    memory_efficient: bool = False, cpu_offload: bool = False) -> Tuple[bool, str]:
         """Load models if not already loaded or if path changed"""
         try:
-            # Proactively clear VRAM before attempting to load our models.
-            if cpu_offload or memory_efficient:
-                logger.info("Proactively unloading other models to make space...")
-                mm.unload_all_models()
-                import gc; gc.collect()
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache() 
 
             # Set default paths if empty
             if not model_path.strip():
@@ -243,12 +237,15 @@ class HunyuanVideoFoleyNode:
             
             # Load models
             cls._model_dict, cls._cfg = load_model(model_path, config_path, cls._device)
-            cls._model_path = model_path
+            # Do not set _model_path here if preloaded, to prevent stale state.
+            if cls._model_path != "preloaded":
+                cls._model_path = model_path
+            
             cls._memory_efficient = memory_efficient
             
             logger.info("Models loaded successfully!")
             return True, "Models loaded successfully!"
-            
+        
         except Exception as e:
             error_msg = f"Failed to load models: {str(e)}"
             logger.error(error_msg)
@@ -346,35 +343,37 @@ class HunyuanVideoFoleyNode:
                       silent_audio: bool = True):
         """Generate audio for the input video/images with the given text prompt"""
         
-        # Helper function to create return values on a clean exit or a caught failure.
-        def create_exit_values(message="Process skipped or failed."):
-            if silent_audio:
-                audio_output = {"waveform": torch.zeros((1, 1, 1)), "sample_rate": 48000}
-            else:
-                audio_output = None
-            
-            empty_frames = torch.zeros((1, 1, 1, 3), dtype=torch.float32)
-            return ("", empty_frames, audio_output, message)
-                
-        # 1. Enabled/Disabled Short-Circuit
+        # 1. Enabled/Disabled Short-Circuit with Intelligent Passthrough
         if not enabled:
-            logger.info("HunyuanVideo-Foley node is disabled. Skipping execution.")
-            _, frames, audio, _ = create_exit_values()
-            return ("", frames, audio, "✅ Node disabled. Skipped.")
+            logger.info("HunyuanVideo-Foley node is disabled. Passing through inputs.")
+            return create_node_exit_values(
+                silent_audio=silent_audio,
+                passthrough_video=video,
+                passthrough_images=images,
+                message="✅ Node disabled. Skipped."
+            )
         
         # 2. Robust Error Handling Wrapper
         try:
             # Set seed for reproducibility
             self.set_seed(seed)
             
-            # Load models if needed.
+            # --- Proactive VRAM Cleanup ---
+            logger.info("Performing pre-run VRAM cleanup...")
+            mm.unload_all_models()
+            import gc; gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            # --- End of Fix ---
+
+            # If the class doesn't have a model dictionary, it must be loaded.
             if self._model_dict is None or self._cfg is None:
-                success, message = self.load_models("", "", memory_efficient, cpu_offload)
+                logger.info("No models loaded, attempting to load fresh...")
+                success, message = self.load_models(memory_efficient=memory_efficient, cpu_offload=cpu_offload)
                 if not success:
-                    # Instead of returning, raise an exception to be caught by our handler.
                     raise Exception(f"Model loading failed: {message}")
             else:
-                logger.info("Using already loaded models")
+                logger.info("Using pre-loaded models from class state.")
             
             # Validate that models are loaded
             if self._model_dict is None or self._cfg is None:
@@ -414,7 +413,7 @@ class HunyuanVideoFoleyNode:
             # --- End of Fix ---
 
             logger.info("Generating audio...")
-            audio, sample_rate = denoise_process(
+            audio, sample_rate = denoise_process_safely(
                 visual_feats, text_feats, audio_len_in_s, self._model_dict, self._cfg,
                 guidance_scale=guidance_scale, num_inference_steps=num_inference_steps, batch_size=sample_nums
             )
@@ -460,46 +459,54 @@ class HunyuanVideoFoleyNode:
                     video_output_path = video_file
             
             if output_format in ["frames", "both"]:
-                try:
-                    import cv2
-                    cap = cv2.VideoCapture(video_file)
-                    frames_list = []
-                    while True:
-                        ret, frame = cap.read()
-                        if not ret: break
-                        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                        frame_normalized = np.array(frame_rgb, dtype=np.float32) / 255.0
-                        frames_list.append(frame_normalized)
-                    cap.release()
-                    if frames_list:
-                        video_frames = torch.from_numpy(np.stack(frames_list))
-                        logger.info(f"Extracted {len(frames_list)} frames")
-                except Exception as e:
-                    logger.warning(f"Could not extract frames: {e}")
+                if images is not None:
+                    # If the input was an image tensor, just pass it through.
+                    video_frames = images
+                elif video_file:
+                    # If the input was a video file, extract the frames.
+                    try:
+                        import cv2
+                        cap = cv2.VideoCapture(video_file)
+                        frames_list = []
+                        while True:
+                            ret, frame = cap.read()
+                            if not ret: break
+                            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                            frames_list.append(np.array(frame_rgb, dtype=np.float32) / 255.0)
+                        cap.release()
+                        if frames_list:
+                            video_frames = torch.from_numpy(np.stack(frames_list))
+                            logger.info(f"Extracted {len(frames_list)} frames for output")
+                    except Exception as e:
+                        logger.warning(f"Could not extract frames for output: {e}")
             
             if temp_video_created and os.path.exists(video_file):
                 try: os.remove(video_file)
                 except: pass
             
             if memory_efficient:
-                del visual_feats, text_feats, audio
-                import gc
-                gc.collect()
-                if torch.cuda.is_available(): torch.cuda.empty_cache()
+                # Only unload completely if the model was NOT preloaded by an upstream node.
+                if self._model_path != "preloaded":
+                    logger.info("Memory efficient mode: Unloading models completely.")
+                    self._model_dict = None
+                    self._cfg = None
+                    self._model_path = None
+                else:
+                    logger.info("Memory efficient mode: Models are preloaded, skipping complete unload.")
             
             success_msg = f"✅ Generated audio successfully"
             return (video_output_path, video_frames, audio_result, success_msg)
             
         except Exception as e:
-            # This is our single, centralized catch block.
             import traceback
             error_msg = f"❌ Generation failed: {str(e)}"
-            logger.error(error_msg)
-            logger.error(traceback.format_exc()) # Log the full error for debugging
-            
-            # Use the helper to return the correct output based on the silent_audio flag.
-            _, frames, audio, _ = create_exit_values(error_msg)
-            return ("", frames, audio, error_msg)
+            logger.error(error_msg); logger.error(traceback.format_exc())
+            return create_node_exit_values(
+                silent_audio=silent_audio,
+                passthrough_video=video,
+                passthrough_images=images,
+                message=error_msg
+            )
         
         finally:
             logger.info("HunyuanVideo-Foley: Starting guaranteed cleanup...")
@@ -833,70 +840,28 @@ class HunyuanVideoFoleyGeneratorAdvanced(HunyuanVideoFoleyNode):
     CATEGORY = "HunyuanVideo-Foley"
     DESCRIPTION = "Generate audio with optional pre-loaded/optimized models"
     
-    def generate_audio_advanced(self, text_prompt: str, guidance_scale: float,
-                               num_inference_steps: int, sample_nums: int, seed: int,
-                               video=None, images=None, fps=24.0,
-                               negative_prompt="",
-                               output_format="video_path",
-                               output_folder="hunyuan_foley",
-                               filename_prefix="foley_",
-                               memory_efficient=False,
-                               cpu_offload=False,
-                               compiled_model=None,
-                               # Add your new parameters here
-                               enabled: bool = True,
-                               silent_audio: bool = True):
-        """Generate audio using either compiled model or loading fresh"""
-        
-        # --- Helper function for clean exits/failures ---
-        def create_exit_values(message="Process skipped or failed."):
-            if silent_audio:
-                audio_output = {"waveform": torch.zeros((1, 1, 1)), "sample_rate": 48000}
-            else:
-                audio_output = None
-            
-            empty_frames = torch.zeros((1, 1, 1, 3), dtype=torch.float32)
-            return ("", empty_frames, audio_output, message)
-        
-        # 1. Enabled/Disabled Short-Circuit
-        if not enabled:
-            logger.info("HunyuanVideo-Foley node is disabled. Skipping execution.")
-            _, frames, audio, _ = create_exit_values()
-            return ("", frames, audio, "✅ Node disabled. Skipped.")
-                
-        # If compiled model provided, use it
-        if compiled_model is not None:
-            # Check if compiled_model is a tuple (from node output)
-            if isinstance(compiled_model, tuple):
-                compiled_model = compiled_model[0]
-            
+    def generate_audio_advanced(self, **kwargs):
+        compiled_model = kwargs.get("compiled_model")
+
+        if compiled_model:
+            if isinstance(compiled_model, tuple): compiled_model = compiled_model[0]
             if compiled_model and isinstance(compiled_model, dict):
-                # Set class-level variables to prevent reloading
-                self.__class__._model_dict = compiled_model["model_dict"]
-                self.__class__._cfg = compiled_model["cfg"]
-                self.__class__._device = compiled_model["device"]
+                self.__class__._model_dict = compiled_model.get("model_dict")
+                self.__class__._cfg = compiled_model.get("cfg")
+                self.__class__._device = compiled_model.get("device")
                 self.__class__._model_path = "preloaded"
-                self.__class__._memory_efficient = memory_efficient
-                
-                logger.info("Using pre-loaded/compiled model")
+                self.__class__._memory_efficient = kwargs.get("memory_efficient", False)
+                logger.info("Using pre-loaded/compiled model from input.")
             else:
-                logger.warning("Invalid compiled model provided, will load fresh")
-        
-        try:
-            # Call parent generate_audio
-            return self.generate_audio(
-                text_prompt, guidance_scale, num_inference_steps, sample_nums, seed,
-                video, images, fps, negative_prompt, output_format,
-                output_folder, filename_prefix, memory_efficient, cpu_offload, enabled, silent_audio
-            )
-        except Exception as e:
-            import traceback
-            error_msg = f"❌ Generation failed: {str(e)}"
-            logger.error(error_msg)
-            logger.error(traceback.format_exc())
+                logger.warning("Invalid compiled_model input. Clearing state to force reload.")
+                self.__class__._model_dict, self.__class__._cfg, self.__class__._model_path = None, None, None
+        else:
+            # If no model is piped in, we MUST clear the state. This prevents
+            # using a stale model from a previous run.
+            logger.info("No pre-loaded model detected. Clearing state to force fresh load.")
+            self.__class__._model_dict, self.__class__._cfg, self.__class__._model_path = None, None, None
             
-            _, frames, audio, _ = create_exit_values(error_msg)
-            return ("", frames, audio, error_msg)
+        return self.generate_audio(**kwargs)
 
 # Node mappings for ComfyUI
 NODE_CLASS_MAPPINGS = {
