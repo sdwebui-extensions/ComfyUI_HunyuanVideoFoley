@@ -59,6 +59,58 @@ The models can be obtained in two ways:
 - Place models in `ComfyUI/models/foley/` (recommended) or `./pretrained_models/` directory
 - Ensure the config file is at `configs/hunyuanvideo-foley-xxl.yaml`
 
+## Operation Guide: How to Use the Nodes
+
+This custom node package is designed in a modular way for maximum flexibility and efficiency. Here is the recommended workflow and an explanation of what each node does.
+
+### Recommended Workflow
+
+The most powerful and efficient way to use these nodes is to chain them together in the following order:
+
+`Model Loader` → `Dependencies Loader` → `Torch Compile` → `Generator (Advanced)`
+
+This setup allows you to load the models only once, apply performance optimizations, and then run the generator multiple times without reloading, saving significant time and VRAM.
+
+### Node Details
+
+#### 1. HunyuanVideo-Foley Model Loader (FP8)
+This is the starting point. It loads the main (and very large) audio generation model into memory.
+
+-   **quantization**: This is the most important setting for saving VRAM.
+    -   `none`: Loads the model in its original format (highest VRAM usage).
+    -   `fp8_e5m2` / `fp8_e4m3fn`: These options use **FP8 quantization**, a technique that stores the model's weights in a much smaller format. This can save several gigabytes of VRAM with a minimal impact on audio quality, making it possible to run on GPUs with less memory.
+-   **cpu_offload**: If `True`, the model will be kept in your regular RAM instead of VRAM. This is not the same as the generator's offload setting; use this if you are loading multiple different models in your workflow and need to conserve VRAM.
+
+#### 2. HunyuanVideo-Foley Dependencies
+This node takes the main model from the loader and then loads all the smaller, auxiliary models required for the process (the VAE, text encoder, and visual feature extractors).
+
+#### 3. HunyuanVideo-Foley Torch Compile
+This is an optional but highly recommended performance-enhancing node. It uses `torch.compile` to optimize the model's code for your specific hardware.
+-   **Note**: The very first time you run a workflow with this node, it will take a minute or two to perform the compilation. However, every subsequent run will be significantly faster (often 20-30%).
+
+#### 4. HunyuanVideo-Foley Generator (Advanced)
+This is the main workhorse node where the audio generation happens.
+
+-   **video / images**: Your visual input. You can provide either a video file or a batch of images from another node.
+-   **compiled_model**: The input for the model prepared by the upstream nodes.
+-   **text_prompt / negative_prompt**: Your descriptions of the sound you want (and don't want).
+-   **guidance_scale / num_inference_steps / seed**: Standard diffusion model controls for creativity vs. prompt adherence, quality vs. speed, and reproducibility.
+-   **enabled**: A simple switch. If `False`, the node does nothing and passes through an empty/silent output. This is useful for disabling parts of a complex workflow without having to disconnect them.
+-   **silent_audio**: Controls what happens when the node is disabled or fails. If `True`, it outputs a valid, silent audio clip, which prevents downstream nodes (like video combiners) from failing. If `False`, it outputs `None`.
+
+### Understanding the Memory Options
+
+The two memory-related checkboxes on the Generator node are crucial for managing your GPU's resources. Here is exactly what they do:
+
+-   **`cpu_offload`**:
+    -   **What it does:** If this is `True`, the node will always move the models to your regular RAM (CPU) after the generation is complete. This is the best option for freeing up VRAM for other nodes in your workflow while still keeping the models ready for the next run without having to reload them from disk.
+    -   **Use this when:** You want to run other VRAM-intensive nodes after this one and plan to come back to the Foley generator later.
+
+-   **`memory_efficient`**:
+    -   **What it does:** This is a more aggressive option. If `True`, the node will completely unload the models from memory (both VRAM and RAM) after the generation is finished.
+    -   **Important Distinction:** This process is smart. It will **only** unload the model if it was loaded by the generator node itself (the simple workflow). If the model was passed in from the `HunyuanVideoFoleyModelLoader` (the advanced workflow), it will **not** unload it, respecting the fact that you may want to reuse the pre-loaded model for another generation.
+    -   **Use this when:** You are finished with audio generation and want to free up as much memory as possible for completely different tasks.
+
 ## Usage
 
 ### Node Types
