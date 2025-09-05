@@ -90,3 +90,7 @@ venv.bak/
 *.njsproj
 *.sln
 *.swp
+
+# AI tool-specific files
+.claude/
+.serena/

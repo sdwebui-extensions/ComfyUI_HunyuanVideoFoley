@@ -88,6 +88,13 @@ This node takes the main model from the loader and then loads all the smaller, a
 This is an optional but highly recommended performance-enhancing node. It uses `torch.compile` to optimize the model's code for your specific hardware.
 -   **Note**: The very first time you run a workflow with this node, it will take a minute or two to perform the compilation. However, every subsequent run will be significantly faster (often 20-30%).
 
+-   **`compile_mode`**: This controls the trade-off between compilation time and the amount of performance gain.
+    -   `default`: The best balance. It provides a good speedup with a reasonable initial compile time.
+    -   `reduce-overhead`: Compiles more slowly but can reduce the overhead of running the model, which might be faster for very small audio generations.
+    -   `max-autotune`: Takes the longest to compile initially, but it tries many different optimizations to find the absolute fastest option for your specific hardware.
+
+-   **`backend`**: This is an advanced setting that changes the underlying compiler used by PyTorch. For most users, the default `inductor` is the best choice.
+
 #### 4. HunyuanVideo-Foley Generator (Advanced)
 This is the main workhorse node where the audio generation happens.
 
@@ -110,6 +117,29 @@ The two memory-related checkboxes on the Generator node are crucial for managing
     -   **What it does:** This is a more aggressive option. If `True`, the node will completely unload the models from memory (both VRAM and RAM) after the generation is finished.
     -   **Important Distinction:** This process is smart. It will **only** unload the model if it was loaded by the generator node itself (the simple workflow). If the model was passed in from the `HunyuanVideoFoleyModelLoader` (the advanced workflow), it will **not** unload it, respecting the fact that you may want to reuse the pre-loaded model for another generation.
     -   **Use this when:** You are finished with audio generation and want to free up as much memory as possible for completely different tasks.
+
+### Performance Tuning & VRAM Usage
+
+The most memory-intensive part of the process is visual feature extraction. We've implemented batched processing to prevent out-of-memory errors with longer videos or on GPUs with less VRAM. You can control this with two settings on the **Generator (Advanced)** node:
+
+-   **`feature_extraction_batch_size`**: This determines how many video frames are processed by the feature extractor models at once.
+    -   **Lower values** significantly reduce peak VRAM usage at the cost of slightly slower processing.
+    -   **Higher values** speed up processing but require more VRAM.
+
+-   **`enable_profiling`**: If you check this box, the node will print detailed performance timings and peak VRAM usage for the feature extraction step to the console. This is highly recommended for finding the optimal batch size for your specific hardware.
+
+#### Recommended Batch Sizes
+
+These are general starting points. The optimal value can vary based on your exact GPU, driver version, and other running processes.
+
+| VRAM Tier | Video Resolution | Recommended Batch Size | Notes |
+| :--- | :--- | :--- | :--- |
+| **≤ 8 GB** | 480p | 4 - 8 | Start with 4. If successful, you can try increasing it. |
+| | 720p | 2 - 4 | Start with 2. 720p videos are demanding on low VRAM cards. |
+| **12-16 GB** | 480p | 16 - 32 | The default of 16 should work well. Can be increased for more speed. |
+| | 720p | 8 - 16 | Start with 8 or 16. |
+| **≥ 24 GB**| 480p | 32 - 64 | You can safely increase the batch size for maximum performance. |
+| | 720p | 16 - 32 | A batch size of 32 should be easily achievable. |
 
 ## Usage
 

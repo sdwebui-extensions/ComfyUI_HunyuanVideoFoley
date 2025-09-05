@@ -54,6 +54,7 @@ try:
     from .utils import feature_process_unified, extract_video_path, create_node_exit_values
     from hunyuanvideo_foley.utils.media_utils import merge_audio_video
     from .model_urls import get_model_url
+    from .model_management import find_or_download, get_siglip_path, get_clap_path, get_model_dir
 except ImportError as e:
     logger.error(f"Failed to import HunyuanVideo-Foley modules: {e}")
     logger.error("Make sure the HunyuanVideo-Foley package is installed and accessible")
@@ -144,6 +145,19 @@ class HunyuanVideoFoleyNode:
                     "placeholder": "Prefix for output filename"
                 }),
                 # Memory optimization options
+                "feature_extraction_batch_size": ("INT", {
+                    "default": 0, "min": 0, "max": 128, "step": 2,
+                    "tooltip": "Frames to process at once. Set to 0 for auto-detection based on VRAM. Default is 16 for >16GB VRAM."
+                }),
+                "syncformer_batch_size": ("INT", {
+                    "default": 8, "min": 1, "max": 64, "step": 1,
+                    "tooltip": "(Advanced) Internal batch size for the Syncformer model. Lower this if you still get OOM errors with long videos."
+                }),
+                "enable_profiling": ("BOOLEAN", {
+                    "default": False,
+                    "display": "checkbox",
+                    "tooltip": "Enable detailed performance and memory logging in the console."
+                }),
                 "memory_efficient": ("BOOLEAN", {
                     "default": False,
                     "display": "checkbox",
@@ -201,89 +215,54 @@ class HunyuanVideoFoleyNode:
         return device
 
     @classmethod
-    def download_models(cls, model_name: str, destination_dir: str) -> Tuple[bool, str]:
-        """Download models from URLs if they don't exist."""
-        model_info = get_model_url(model_name)
-        if not model_info:
-            return False, f"Model '{model_name}' not found in configuration."
-
-        os.makedirs(destination_dir, exist_ok=True)
-
-        for model_file in model_info.get("models", []):
-            filename = model_file.get("filename")
-            url = model_file.get("url")
-
-            if not filename or not url:
-                logger.warning("Skipping a model file due to missing filename or URL.")
-                continue
-
-            destination_path = os.path.join(destination_dir, filename)
-
-            if os.path.exists(destination_path):
-                logger.info(f"'{filename}' already exists. Skipping download.")
-                continue
-
-            logger.info(f"Downloading '{filename}' from '{url}'...")
-
-            try:
-                # Use comfy.utils for resumable downloads with progress bar
-                comfy.utils.pb_download(url, destination_path)
-            except Exception as e:
-                return False, f"Failed to download '{filename}': {str(e)}"
-
-        return True, "All models downloaded or already exist."
-
-    @classmethod
-    def load_models(cls, model_path: str = "", config_path: str = "",
+    def load_models(cls, model_path: str = "", config_path: str = "", 
                    memory_efficient: bool = False, cpu_offload: bool = False) -> Tuple[bool, str]:
         """Load models if not already loaded or if path changed"""
         try:
+            # --- New Robust Model Pathing ---
+            # Use our model manager as a pre-flight check to ensure all models
+            # are downloaded and present before we proceed.
+            logger.info("Verifying local model integrity...")
+            find_or_download("hunyuanvideo_foley.pth", "Tencent-Hunyuan/HunyuanVideo-Foley", "hunyuanvideo-foley-xxl")
+            find_or_download("vae_128d_48k.pth", "Tencent-Hunyuan/HunyuanVideo-Foley", "hunyuanvideo-foley-xxl")
+            find_or_download("synchformer_state_dict.pth", "Tencent-Hunyuan/HunyuanVideo-Foley", "hunyuanvideo-foley-xxl")
+            get_siglip_path()  # This ensures the Hugging Face cache is populated if needed
+            get_clap_path()
+            logger.info("All models found or downloaded successfully.")
 
-            # Set default paths if empty
-            if not model_path.strip():
-                foley_models_dir = folder_paths.get_folder_paths("foley")[0]
-                model_path = os.path.join(foley_models_dir, "hunyuanvideo-foley-xxl")
-
-            # --- Auto-Downloader Integration ---
-            if not os.path.exists(model_path):
-                logger.info(f"Model directory not found at '{model_path}'. Attempting to download...")
-                success, message = cls.download_models("hunyuanvideo-foley-xxl", model_path)
-                if not success:
-                    return False, f"Auto-download failed: {message}"
-            # --- End of Integration ---
+            # Now, get the single directory path that the original library expects.
+            model_dir = get_model_dir("hunyuanvideo-foley-xxl")
 
             if not config_path.strip():
                 current_dir = os.path.dirname(os.path.abspath(__file__))
                 config_path = os.path.join(current_dir, "configs", "hunyuanvideo-foley-xxl.yaml")
 
-            # Check if models are already loaded with the same path and memory mode
-            # Also check for "preloaded" which means models came from pipeline
-            if (cls._model_dict is not None and
-                cls._cfg is not None and
-                (cls._model_path == model_path or cls._model_path == "preloaded") and
+            # --- Caching Check (checks against the directory path string) ---
+            if (cls._model_dict is not None and 
+                cls._cfg is not None and 
+                (cls._model_path == model_dir or cls._model_path == "preloaded") and
                 cls._memory_efficient == memory_efficient):
                 return True, "Models already loaded"
-
-            # Setup device
+            
             cls._device = cls.setup_device("auto", 0)
-
-            logger.info(f"Loading models from: {model_path}")
+            logger.info(f"Loading models from directory: {model_dir}")
             logger.info(f"Config: {config_path}")
-
-            # Load models
-            cls._model_dict, cls._cfg = load_model(model_path, config_path, cls._device)
-            # Do not set _model_path here if preloaded, to prevent stale state.
+            
+            # Call the original library loader with the directory path it expects.
+            cls._model_dict, cls._cfg = load_model(model_dir, config_path, cls._device)
+            
             if cls._model_path != "preloaded":
-                cls._model_path = model_path
-
+                cls._model_path = model_dir
             cls._memory_efficient = memory_efficient
-
+            
             logger.info("Models loaded successfully!")
             return True, "Models loaded successfully!"
-
+        
         except Exception as e:
+            import traceback
             error_msg = f"Failed to load models: {str(e)}"
             logger.error(error_msg)
+            logger.error(traceback.format_exc())
             cls._model_dict = None
             cls._cfg = None
             cls._device = None
@@ -379,9 +358,22 @@ class HunyuanVideoFoleyNode:
                       memory_efficient: bool = False,
                       cpu_offload: bool = False,
                       enabled: bool = True,
-                      silent_audio: bool = True):
+                      silent_audio: bool = True,
+                      feature_extraction_batch_size: int = 16,
+                      syncformer_batch_size: int = 8,
+                      enable_profiling: bool = False):
         """Generate audio for the input video/images with the given text prompt"""
+        
+        # --- Input Validation & Auto Batching ---
+        effective_batch_size = feature_extraction_batch_size
+        if effective_batch_size == 0:
+            from .utils import get_auto_batch_size
+            effective_batch_size = get_auto_batch_size()
 
+        if effective_batch_size < 1:
+            logger.warning(f"Batch size cannot be less than 1. Clamping value from {feature_extraction_batch_size} to 1.")
+            effective_batch_size = 1
+            
         if not enabled:
             logger.info("HunyuanVideo-Foley node is disabled. Passing through inputs.")
             return create_node_exit_values(
@@ -424,7 +416,10 @@ class HunyuanVideoFoleyNode:
                 negative_prompt=negative_prompt,
                 model_dict=self._model_dict,
                 cfg=self._cfg,
-                fps_hint=fps
+                fps_hint=fps,
+                batch_size=effective_batch_size,
+                sync_batch_size=syncformer_batch_size,
+                enable_profiling=enable_profiling
             )
 
             # --- State Correction and VRAM Management for Denoising ---

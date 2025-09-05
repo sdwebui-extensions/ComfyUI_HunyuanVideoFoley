@@ -12,11 +12,80 @@ import decord
 from tqdm import tqdm
 from PIL import Image
 from einops import rearrange
+import time
 
 # We need to import the original library functions that our safe wrappers will call.
 from hunyuanvideo_foley.utils.feature_utils import encode_text_feat, encode_video_with_siglip2, encode_video_with_sync
 from hunyuanvideo_foley.utils.config_utils import AttributeDict
 
+
+def _encode_video_with_siglip2_safely(pixel_values, model_dict):
+    """
+    A wrapper to handle different versions of the transformers library for SigLIP2.
+    Expects a 4D tensor of shape (B, C, H, W).
+    """
+    if hasattr(model_dict.siglip2_model, 'get_image_features'):
+        # Older transformers versions
+        return model_dict.siglip2_model.get_image_features(pixel_values=pixel_values)
+    else:
+        # Newer transformers versions
+        return model_dict.siglip2_model(pixel_values=pixel_values).image_embeds
+
+
+def get_auto_batch_size():
+    """
+    Automatically determines a safe batch size based on available GPU VRAM.
+    """
+    if not torch.cuda.is_available():
+        logger.info("CUDA not available, returning default batch size of 4 for CPU.")
+        return 4 # A safe default for CPU
+
+    try:
+        total_vram_gb = torch.cuda.get_device_properties(0).total_memory / (1024**3)
+        logger.info(f"Detected {total_vram_gb:.2f} GB of total VRAM.")
+
+        if total_vram_gb <= 8:
+            batch_size = 4
+        elif total_vram_gb <= 12:
+            batch_size = 8
+        elif total_vram_gb <= 16:
+            batch_size = 16
+        else: # > 16GB
+            batch_size = 32
+        
+        logger.info(f"Setting automatic batch size to {batch_size}.")
+        return batch_size
+    except Exception as e:
+        logger.warning(f"Could not determine VRAM, falling back to default batch size of 8. Error: {e}")
+        return 8 # Fallback
+
+
+class SimpleProfiler:
+    """A simple profiler for timing and CUDA memory logging."""
+    def __init__(self, name, enabled=True):
+        self.name = name
+        self.enabled = enabled
+        self.start_time = None
+        self.device = get_optimal_device()
+
+    def __enter__(self):
+        if not self.enabled: return self
+        self.start_time = time.time()
+        if self.device.type == 'cuda':
+            torch.cuda.reset_peak_memory_stats(self.device)
+            start_mem = torch.cuda.memory_allocated(self.device) / 1024**2
+            logger.info(f"[Profiler:{self.name}] Entering block. Start VRAM: {start_mem:.2f} MB")
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        if not self.enabled: return
+        elapsed_time = time.time() - self.start_time
+        if self.device.type == 'cuda':
+            peak_mem = torch.cuda.max_memory_allocated(self.device) / 1024**2
+            end_mem = torch.cuda.memory_allocated(self.device) / 1024**2
+            logger.info(f"[Profiler:{self.name}] Exiting block. Time: {elapsed_time:.4f}s. VRAM Usage (End/Peak): {end_mem:.2f} / {peak_mem:.2f} MB")
+        else:
+            logger.info(f"[Profiler:{self.name}] Exiting block. Time: {elapsed_time:.4f}s. (Running on CPU)")
 
 def tensor_to_video(video_tensor: torch.Tensor, output_path: str, fps: int = 30) -> str:
     """
@@ -146,7 +215,7 @@ def extract_video_path(video):
     return None
 
 @torch.inference_mode()
-def _encode_visual_features_safely(frames_uint8, model_dict, fps_hint):
+def _encode_visual_features_safely(frames_uint8, model_dict, fps_hint, batch_size=16, sync_batch_size=8, enable_profiling=False):
     """ Memory-safe visual feature extraction from a list of pre-loaded frames. """
     dev = model_dict.device
     
@@ -159,23 +228,37 @@ def _encode_visual_features_safely(frames_uint8, model_dict, fps_hint):
     visual_features = {}
     pil_list = [Image.fromarray(f).convert("RGB") for f in frames_uint8]
     
+    # --- BATCHED SigLIP2 ---
+    all_siglip_feats = []
     try:
         logger.info("Moving SigLIP2 to device for feature extraction...")
         model_dict.siglip2_model.to(dev)
-        siglip_list = [model_dict.siglip2_preprocess(im) for im in pil_list]
-        clip_frames = torch.stack(siglip_list, dim=0).unsqueeze(0).to(dev)
-        visual_features['siglip2_feat'] = encode_video_with_siglip2(clip_frames, model_dict).to(dev)
+        with SimpleProfiler("SigLIP2 Batching", enabled=enable_profiling):
+            for i in tqdm(range(0, len(pil_list), batch_size), desc="Processing SigLIP2 batches"):
+                batch_pils = pil_list[i:i+batch_size]
+                siglip_list = [model_dict.siglip2_preprocess(im) for im in batch_pils]
+                clip_frames = torch.stack(siglip_list, dim=0).to(dev)
+                batch_feat = _encode_video_with_siglip2_safely(clip_frames, model_dict)
+                all_siglip_feats.append(batch_feat.cpu())
+
+        if all_siglip_feats:
+            # Concatenate along the batch dimension (dim=0)
+            final_feats = torch.cat(all_siglip_feats, dim=0)
+            # Reshape to what the pipeline expects: (1, total_frames, feature_dim)
+            visual_features['siglip2_feat'] = final_feats.unsqueeze(0).to(dev)
     finally:
         logger.info("Offloading SigLIP2 from device."); model_dict.siglip2_model.to("cpu")
         if dev.type == 'cuda': torch.cuda.empty_cache()
 
+    # --- BATCHED Syncformer ---
     try:
         logger.info("Moving Syncformer to device for feature extraction...")
         model_dict.syncformer_model.to(dev)
-        # Correctly preprocess frames for syncformer one by one
-        sync_list = [model_dict.syncformer_preprocess(im) for im in pil_list]
-        sync_frames = torch.stack(sync_list, dim=0).unsqueeze(0).to(dev)
-        visual_features['syncformer_feat'] = encode_video_with_sync(sync_frames, model_dict)
+        with SimpleProfiler("Syncformer Processing", enabled=enable_profiling):
+            # Syncformer needs all frames at once, but we can batch its internal processing.
+            sync_list = [model_dict.syncformer_preprocess(im) for im in pil_list]
+            sync_frames = torch.stack(sync_list, dim=0).unsqueeze(0).to(dev)
+            visual_features['syncformer_feat'] = encode_video_with_sync(sync_frames, model_dict, batch_size=sync_batch_size)
     finally:
         logger.info("Offloading Syncformer from device."); model_dict.syncformer_model.to("cpu")
         if dev.type == 'cuda': torch.cuda.empty_cache()
@@ -183,7 +266,7 @@ def _encode_visual_features_safely(frames_uint8, model_dict, fps_hint):
     audio_len_in_s = len(frames_uint8) / fps_hint
     return AttributeDict(visual_features), audio_len_in_s
 
-def feature_process_unified(video_input, image_input, prompt, model_dict, cfg, negative_prompt="", fps_hint=24.0, max_frames=450):
+def feature_process_unified(video_input, image_input, prompt, model_dict, cfg, negative_prompt="", fps_hint=24.0, max_frames=450, batch_size=16, sync_batch_size=8, enable_profiling=False):
     """ Unified, memory-safe feature processing for either a video path or an image tensor. """
     frames_uint8 = None; fps = fps_hint
     
@@ -204,7 +287,7 @@ def feature_process_unified(video_input, image_input, prompt, model_dict, cfg, n
 
     if frames_uint8 is None: raise ValueError("No valid video or image frames to process.")
 
-    visual_feats, audio_len_in_s = _encode_visual_features_safely(frames_uint8, model_dict, fps)
+    visual_feats, audio_len_in_s = _encode_visual_features_safely(frames_uint8, model_dict, fps, batch_size, sync_batch_size, enable_profiling)
 
     # Use the provided negative prompt, or fall back to a default.
     neg_prompt = negative_prompt if negative_prompt and negative_prompt.strip() else "noisy, harsh"
