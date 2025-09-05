@@ -205,32 +205,32 @@ class HunyuanVideoFoleyNode:
 
         return True, "All models downloaded or already exist."
         
-        @classmethod
-        def setup_device(cls, device_type: str = "auto", device_id: int = 0):
-            """Setup and return the appropriate device with memory optimization"""
-            # Try to import ComfyUI's model management if available
-            try:
-                import comfy.model_management as mm
-                device = mm.get_torch_device()
-                logger.info(f"Using ComfyUI device: {device}")
-                return device
-            except:
-                pass
-            
-            if device_type == "auto":
-                if torch.cuda.is_available():
-                    device = torch.device(f"cuda:{device_id}")
-                    # Clear cache before loading
-                    torch.cuda.empty_cache()
-                    if hasattr(torch.cuda, 'reset_peak_memory_stats'):
-                        torch.cuda.reset_peak_memory_stats(device)
-                else:
-                    device = torch.device("cpu")
-            else:
-                device = torch.device(device_type)
-            
-            logger.info(f"Using device: {device}")
+    @classmethod
+    def setup_device(cls, device_type: str = "auto", device_id: int = 0):
+        """Setup and return the appropriate device with memory optimization"""
+        # Try to import ComfyUI's model management if available
+        try:
+            import comfy.model_management as mm
+            device = mm.get_torch_device()
+            logger.info(f"Using ComfyUI device: {device}")
             return device
+        except:
+            pass
+        
+        if device_type == "auto":
+            if torch.cuda.is_available():
+                device = torch.device(f"cuda:{device_id}")
+                # Clear cache before loading
+                torch.cuda.empty_cache()
+                if hasattr(torch.cuda, 'reset_peak_memory_stats'):
+                    torch.cuda.reset_peak_memory_stats(device)
+            else:
+                device = torch.device("cpu")
+        else:
+            device = torch.device(device_type)
+        
+        logger.info(f"Using device: {device}")
+        return device
     
     @classmethod
     def load_models(cls, model_path: str = "", config_path: str = "", 
