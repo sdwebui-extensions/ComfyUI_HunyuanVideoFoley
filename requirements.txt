@@ -16,5 +16,5 @@ descript-audio-codec
 scipy
 soxr
 ffmpy
-git+https://github.com/facebookresearch/audiocraft.git#egg=audiocraft
-git+https://github.com/descriptinc/descript-audio-codec.git#egg=descript-audio-codec
+audiocraft
+descript-audio-codec
