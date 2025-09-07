@@ -8,53 +8,79 @@ import subprocess
 import pkg_resources
 from pathlib import Path
 
+def parse_requirements(file_path):
+    """Parse requirements file and handle git dependencies."""
+    requirements = []
+    with open(file_path, 'r') as f:
+        for line in f:
+            line = line.strip()
+            if line and not line.startswith('#'):
+                if line.startswith('git+'):
+                    # For git repos, find the package name from the egg fragment
+                    egg_name = None
+                    if '#egg=' in line:
+                        egg_name = line.split('#egg=')[-1]
+                    
+                    if egg_name:
+                        requirements.append((egg_name, line))
+                    else:
+                        print(f"⚠️ Git requirement '{line}' is missing the '#egg=' part and cannot be checked. It will be installed regardless.")
+                        # Fallback: We can't check it, so we'll just try to install it.
+                        # The package name is passed as None to signal an install attempt.
+                        requirements.append((None, line))
+                else:
+                    # Standard package
+                    req = pkg_resources.Requirement.parse(line)
+                    requirements.append((req.project_name, str(req)))
+    return requirements
+
 def check_and_install_requirements():
-    """Check and install required packages"""
+    """Check and install required packages without overriding existing ones."""
     requirements_file = Path(__file__).parent / "requirements.txt"
     
     if not requirements_file.exists():
-        print("Requirements file not found!")
+        print("❌ Requirements file not found!")
         return False
     
     try:
-        print("Checking and installing requirements...")
+        print("🚀 Checking and installing requirements...")
         
-        # Read requirements
-        with open(requirements_file, 'r') as f:
-            requirements = f.read().splitlines()
+        # Get list of (package_name, requirement_string)
+        requirements = parse_requirements(requirements_file)
         
-        # Filter out comments and empty lines
-        requirements = [line.strip() for line in requirements 
-                       if line.strip() and not line.strip().startswith('#')]
-        
-        # Install packages
-        for requirement in requirements:
+        for pkg_name, requirement_str in requirements:
+            # If pkg_name is None, it's a git URL we couldn't parse. Try installing.
+            if pkg_name is None:
+                print(f"Attempting to install from git: {requirement_str}")
+                try:
+                    subprocess.check_call([sys.executable, '-m', 'pip', 'install', requirement_str])
+                    print(f"✅ Successfully installed {requirement_str}")
+                except subprocess.CalledProcessError as e:
+                    print(f"❌ Failed to install {requirement_str}: {e}")
+                continue
+
+            # Check if the package is already installed
             try:
-                # Skip git+ requirements for now (they need special handling)
-                if requirement.startswith('git+'):
-                    print(f"Installing git requirement: {requirement}")
-                    subprocess.check_call([sys.executable, '-m', 'pip', 'install', requirement])
-                else:
-                    # Check if package is already installed
-                    try:
-                        pkg_resources.require([requirement])
-                        print(f"✓ {requirement} already installed")
-                    except pkg_resources.DistributionNotFound:
-                        print(f"Installing {requirement}...")
-                        subprocess.check_call([sys.executable, '-m', 'pip', 'install', requirement])
-                    except pkg_resources.VersionConflict:
-                        print(f"Updating {requirement}...")
-                        subprocess.check_call([sys.executable, '-m', 'pip', 'install', '--upgrade', requirement])
-                        
-            except subprocess.CalledProcessError as e:
-                print(f"Failed to install {requirement}: {e}")
-                return False
-        
-        print("✅ All requirements installed successfully!")
+                pkg_resources.require(requirement_str)
+                print(f"✅ {pkg_name} is already installed and meets version requirements.")
+            except pkg_resources.DistributionNotFound:
+                print(f"Installing {pkg_name}...")
+                try:
+                    subprocess.check_call([sys.executable, '-m', 'pip', 'install', requirement_str])
+                    print(f"✅ Successfully installed {pkg_name}")
+                except subprocess.CalledProcessError as e:
+                    print(f"❌ Failed to install {pkg_name}: {e}")
+            except pkg_resources.VersionConflict as e:
+                print(f"⚠️ Version conflict for {pkg_name}: {e.req} is required, but you have {e.dist}.")
+                print("   Skipping upgrade to avoid conflicts with other nodes. If you encounter issues, please update this package manually.")
+            except Exception as e:
+                print(f"An unexpected error occurred while checking {pkg_name}: {e}")
+
+        print("✅ All dependencies checked.")
         return True
         
     except Exception as e:
-        print(f"Error installing requirements: {e}")
+        print(f"❌ Error installing requirements: {e}")
         return False
 
 def setup_model_directories():
@@ -89,7 +115,6 @@ def main():
     # Setup directories
     setup_model_directories()
     
-    print("📁 Directory structure created")
     print("📋 Installation completed!")
     print()
     print("📌 Next steps:")
