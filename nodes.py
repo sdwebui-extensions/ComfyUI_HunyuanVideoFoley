@@ -143,6 +143,14 @@ class HunyuanVideoFoleyNode:
                     "display": "text",
                     "placeholder": "Prefix for output filename"
                 }),
+                "feature_extraction_batch_size": ("INT", {
+                    "default": 4, "min": 1, "max": 128, "step": 1,
+                    "tooltip": "Frames to process at once for SigLIP2. Lower to save VRAM on long videos."
+                }),
+                "syncformer_batch_size": ("INT", {
+                    "default": 1, "min": 1, "max": 64, "step": 1,
+                    "tooltip": "Internal batch size for the Syncformer model. Lower if you still get OOM errors."
+                }),
                 # Memory optimization options
                 "memory_efficient": ("BOOLEAN", {
                     "default": False,
@@ -383,7 +391,9 @@ class HunyuanVideoFoleyNode:
                       memory_efficient: bool = False,
                       cpu_offload: bool = False,
                       enabled: bool = True,
-                      silent_audio: bool = True):
+                      silent_audio: bool = True,
+                      feature_extraction_batch_size: int = 4,
+                      syncformer_batch_size: int = 1):       
         """Generate audio for the input video/images with the given text prompt"""
         
         # 1. Enabled/Disabled Short-Circuit with Intelligent Passthrough
@@ -435,7 +445,9 @@ class HunyuanVideoFoleyNode:
                 negative_prompt=negative_prompt,
                 model_dict=self._model_dict,
                 cfg=self._cfg,
-                fps_hint=fps
+                fps_hint=fps,
+                batch_size=feature_extraction_batch_size,
+                sync_batch_size=syncformer_batch_size
             )
             
             # Ensure the core models for denoising are on the correct device before processing.
