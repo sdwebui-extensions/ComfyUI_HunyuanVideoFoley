@@ -651,6 +651,14 @@ class HunyuanVideoFoleyModelLoader:
                     current_dir = os.path.dirname(os.path.abspath(__file__))
                     model_path = os.path.join(current_dir, "pretrained_models")
             
+            # Auto-download models if the directory doesn't exist
+            if not os.path.exists(model_path):
+                logger.info(f"Model directory not found at '{model_path}'. Attempting to download...")
+                # Use the download method from the base node
+                success, message = HunyuanVideoFoleyNode.download_models("hunyuanvideo-foley-xxl", model_path)
+                if not success:
+                    return (None, f"❌ Auto-download failed: {message}")
+            
             if not config_path or not config_path.strip():
                 current_dir = os.path.dirname(os.path.abspath(__file__))
                 config_path = os.path.join(current_dir, "configs", "hunyuanvideo-foley-xxl.yaml")
@@ -910,6 +918,7 @@ class HunyuanVideoFoleyGeneratorAdvanced(HunyuanVideoFoleyNode):
             logger.info("No pre-loaded model detected. Clearing state to force fresh load.")
             self.__class__._model_dict, self.__class__._cfg, self.__class__._model_path = None, None, None
             
+        kwargs.pop('compiled_model', None)
         return self.generate_audio(**kwargs)
 
 # Node mappings for ComfyUI
