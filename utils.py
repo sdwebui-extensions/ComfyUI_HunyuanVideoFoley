@@ -176,7 +176,7 @@ def extract_video_path(video):
 
 @torch.inference_mode()
 def _encode_visual_features_safely(frames_uint8, model_dict, fps_hint, batch_size=4, sync_batch_size=1, enable_profiling=False):
-    """ Pragmatic, memory-safe visual feature extraction using a user-defined batch size. """
+    """ Memory-safe visual feature extraction using multithreaded preprocessing. """
     dev = model_dict.device
     
     logger.info(f"--- Starting Safe Visual Feature Extraction ---")
@@ -188,32 +188,42 @@ def _encode_visual_features_safely(frames_uint8, model_dict, fps_hint, batch_siz
     visual_features = {}
     pil_list = [Image.fromarray(f).convert("RGB") for f in frames_uint8]
     
-    # --- STAGE 1: SigLIP2 (Simple Batched Inference) ---
+    # --- STAGE 1: SigLIP2 (with Multithreaded Preprocessing) ---
     all_siglip_feats = []
     try:
         logger.info("[SigLIP2] Moving model to device...")
         model_dict.siglip2_model.to(dev)
+        
+        from concurrent.futures import ThreadPoolExecutor
+        # Use half the CPU cores for safety, just like before
+        num_workers = max(1, os.cpu_count() // 2)
+        logger.info(f"[SigLIP2] Using {num_workers} CPU threads for parallel preprocessing.")
+        
         with SimpleProfiler("SigLIP2 Batching", enabled=enable_profiling):
-            # Use the simple, reliable batched loop
             for i in tqdm(range(0, len(pil_list), batch_size), desc="Processing SigLIP2 batches"):
                 batch_pils = pil_list[i:i+batch_size]
-                siglip_list = [model_dict.siglip2_preprocess(im) for im in batch_pils]
+                
+                # --- MULTITHREADED PREPROCESSING ---
+                with ThreadPoolExecutor(max_workers=num_workers) as executor:
+                    siglip_list = list(executor.map(model_dict.siglip2_preprocess, batch_pils))
+                # --- END OF MULTITHREADED ---
+
                 clip_frames = torch.stack(siglip_list, dim=0).to(dev)
                 
-                # This now correctly calls the helper function we just added.
                 batch_feat = _encode_video_with_siglip2_safely(clip_frames, model_dict)
                 all_siglip_feats.append(batch_feat.cpu())
                 del batch_pils, siglip_list, clip_frames, batch_feat
         
         if all_siglip_feats:
             visual_features['siglip2_feat'] = torch.cat(all_siglip_feats, dim=0).unsqueeze(0).to(dev)
+            
     finally:
         logger.info("[SigLIP2] Offloading model from device."); model_dict.siglip2_model.to("cpu")
         del all_siglip_feats
         if dev.type == 'cuda': torch.cuda.empty_cache()
     # --- END STAGE 1 ---
 
-    # --- STAGE 2: Syncformer ---
+    # --- STAGE 2: Syncformer (remains the same) ---
     try:
         logger.info("[Syncformer] Moving model to device...")
         model_dict.syncformer_model.to(dev)
@@ -229,7 +239,7 @@ def _encode_visual_features_safely(frames_uint8, model_dict, fps_hint, batch_siz
     audio_len_in_s = len(frames_uint8) / fps_hint
     return AttributeDict(visual_features), audio_len_in_s
 
-def feature_process_unified(video_input, image_input, prompt, model_dict, cfg, negative_prompt="", fps_hint=24.0, max_frames=450, batch_size=4, sync_batch_size=1, enable_profiling=False):
+def feature_process_unified(video_input, image_input, prompt, model_dict, cfg, negative_prompt="", fps_hint=24.0, batch_size=4, sync_batch_size=1, enable_profiling=False):
     """ Unified, memory-safe feature processing for either a video path or an image tensor. """
     frames_uint8 = None; fps = fps_hint
     
@@ -245,7 +255,7 @@ def feature_process_unified(video_input, image_input, prompt, model_dict, cfg, n
         total_frames = len(video_reader)
         fps = video_reader.get_avg_fps()
         
-        frame_indices = np.linspace(0, total_frames - 1, num=min(total_frames, max_frames), dtype=int)
+        frame_indices = np.linspace(0, total_frames - 1, num=total_frames, dtype=int)
         frames_uint8 = video_reader.get_batch(frame_indices).asnumpy()
 
     if frames_uint8 is None: raise ValueError("No valid video or image frames to process.")
