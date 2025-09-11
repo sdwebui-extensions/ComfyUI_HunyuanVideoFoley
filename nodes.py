@@ -260,7 +260,7 @@ class HunyuanVideoFoleyNode:
                 model_path = os.path.join(foley_models_dir, "hunyuanvideo-foley-xxl")
 
             # His auto-downloader logic
-            if not os.path.exists(model_path):
+            if not os.path.exists(os.path.join(model_path, "vae_128d_48k.pth")):
                 if os.path.exists(os.path.join(folder_paths.cache_dir, "models/foley")):
                     foley_models_dir = os.path.join(folder_paths.cache_dir, "models/foley")
                     model_path = os.path.join(foley_models_dir, "hunyuanvideo-foley-xxl")
