@@ -261,10 +261,14 @@ class HunyuanVideoFoleyNode:
 
             # His auto-downloader logic
             if not os.path.exists(model_path):
-                logger.info(f"Model directory not found at '{model_path}'. Attempting to download...")
-                success, message = cls.download_models("hunyuanvideo-foley-xxl", model_path)
-                if not success:
-                    return False, f"Auto-download failed: {message}"
+                if os.path.exists(os.path.join(folder_paths.cache_dir, "models/foley")):
+                    foley_models_dir = os.path.join(folder_paths.cache_dir, "models/foley")
+                    model_path = os.path.join(foley_models_dir, "hunyuanvideo-foley-xxl")
+                else:
+                    logger.info(f"Model directory not found at '{model_path}'. Attempting to download...")
+                    success, message = cls.download_models("hunyuanvideo-foley-xxl", model_path)
+                    if not success:
+                        return False, f"Auto-download failed: {message}"
             
             # Your path logic
             if not config_path.strip():

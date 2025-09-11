@@ -11,6 +11,7 @@ from ..models.hifi_foley import HunyuanVideoFoley
 from .config_utils import load_yaml, AttributeDict
 from .schedulers import FlowMatchDiscreteScheduler
 from tqdm import tqdm
+import folder_paths
 
 def load_state_dict(model, model_path):
     logger.info(f"Loading model state dict from: {model_path}")
@@ -95,7 +96,7 @@ def load_model(model_path, config_path, device):
     
     # Method 1: Try with standard transformers AutoModel
     try:
-        siglip2_model = AutoModel.from_pretrained("google/siglip2-base-patch16-512", trust_remote_code=True).to(device).eval()
+        siglip2_model = AutoModel.from_pretrained(os.path.join(folder_paths.cache_dir, "huggingface/google/siglip2-base-patch16-512"), trust_remote_code=True).to(device).eval()
         logger.info("SigLIP2 loaded using standard transformers")
     except Exception as e1:
         logger.warning(f"Standard transformers loading failed: {e1}")
@@ -103,7 +104,7 @@ def load_model(model_path, config_path, device):
         # Method 2: Try loading from local cache or downloaded weights
         try:
             from transformers import SiglipVisionModel
-            siglip2_model = SiglipVisionModel.from_pretrained("google/siglip-base-patch16-512").to(device).eval()
+            siglip2_model = SiglipVisionModel.from_pretrained(os.path.join(folder_paths.cache_dir, "huggingface/google/siglip2-base-patch16-512")).to(device).eval()
             logger.info("SigLIP2 loaded using SiglipVisionModel (base variant)")
         except Exception as e2:
             logger.warning(f"SiglipVisionModel loading failed: {e2}")
@@ -127,8 +128,8 @@ def load_model(model_path, config_path, device):
 
     # clap text-encoder
     logger.info("Loading CLAP text encoder...")
-    clap_tokenizer = AutoTokenizer.from_pretrained("laion/larger_clap_general")
-    clap_model = ClapTextModelWithProjection.from_pretrained("laion/larger_clap_general").to(device)
+    clap_tokenizer = AutoTokenizer.from_pretrained(os.path.join(folder_paths.cache_dir, "huggingface/laion/larger_clap_general"))
+    clap_model = ClapTextModelWithProjection.from_pretrained(os.path.join(folder_paths.cache_dir, "huggingface/laion/larger_clap_general")).to(device)
     logger.info("CLAP tokenizer and model loaded successfully")
 
     # syncformer
