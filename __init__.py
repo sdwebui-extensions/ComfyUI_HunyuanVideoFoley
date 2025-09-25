@@ -9,7 +9,7 @@ if current_dir not in sys.path:
 
 # Import the individual nodes (with FP8 quantization and torch.compile support)
 logger.info("Loading HunyuanVideo-Foley nodes with FP8 quantization and torch.compile support")
-from .nodes import NODE_CLASS_MAPPINGS, NODE_DISPLAY_NAME_MAPPINGS
+from .hyvideofoley_nodes import NODE_CLASS_MAPPINGS, NODE_DISPLAY_NAME_MAPPINGS
 
 # Export the mappings
 __all__ = ['NODE_CLASS_MAPPINGS', 'NODE_DISPLAY_NAME_MAPPINGS']

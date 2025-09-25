@@ -50,8 +50,8 @@ if "foley" not in folder_paths.folder_names_and_paths:
 # Import the HunyuanVideo-Foley modules
 try:
     from hunyuanvideo_foley.utils.model_utils import load_model
-    from .utils import denoise_process_safely
-    from .utils import feature_process_unified, extract_video_path, create_node_exit_values
+    from .hyvideofoley_utils import denoise_process_safely
+    from .hyvideofoley_utils import feature_process_unified, extract_video_path, create_node_exit_values
     from hunyuanvideo_foley.utils.media_utils import merge_audio_video
     from .model_urls import get_model_url 
 except ImportError as e:
